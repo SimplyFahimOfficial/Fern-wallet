@@ -941,10 +941,10 @@ private fun MoreMenuButton(
                 translationY = (1f - enter.value) * IvyMotion.Stagger.OffsetDp.dp.toPx()
             }
             .pressScale(interactionSource, pressedScale = TilePressedScale)
-            .clip(UI.shapes.r4)
             .clickable(
                 interactionSource = interactionSource,
-                indication = LocalIndication.current,
+                // The press scale and haptic tick are the feedback; a ripple draws a box around icon and label.
+                indication = null,
                 role = Role.Button,
             ) {
                 IvyHaptics.tick(view)
