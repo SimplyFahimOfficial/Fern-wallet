@@ -17,7 +17,7 @@ android {
 dependencies {
     constraints {
         // Robolectric's Bouncy Castle transitive dependency must stay on a patched release.
-        add("testImplementation", "org.bouncycastle:bcprov-jdk18on:1.86") {
+        add("testImplementation", "org.bouncycastle:bcprov-jdk18on:1.87") {
             because("Security floor for the test runtime; the older 1.80 release has critical advisories.")
         }
     }
