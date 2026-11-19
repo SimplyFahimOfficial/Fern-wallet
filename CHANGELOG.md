@@ -157,6 +157,11 @@ See `PLAN.md` for the decisions behind each item.
 - Exporting a backup no longer wipes the app's whole cache folder, and is a consistent snapshot.
 - A backup without settings no longer deletes the current settings (e.g. base currency).
 - Accounts, categories and tags no longer show stale cached data right after an import.
+- Restoring keeps account and category identity: records with the same id are the same record, and
+  a same-name account or category is merged only when it is the one-and-only match (same type and
+  currency for accounts). Two "Savings" accounts in a backup stay two accounts. Ids are remapped
+  only in the fields that reference them, so a UUID typed in a note is left alone. A backup whose
+  transactions point at an account that can't be restored is refused before anything is changed.
 
 ### Identity
 - Renamed to **Fern Wallet** with the wallet-and-leaf logo, a GitHub wordmark, and four selectable
