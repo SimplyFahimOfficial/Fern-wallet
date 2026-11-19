@@ -1,18 +1,26 @@
 package com.ivy.importdata.csv.domain
 
 import androidx.compose.ui.graphics.toArgb
+import arrow.core.Either
+import arrow.core.getOrElse
 import arrow.core.raise.either
+import arrow.core.raise.ensure
+import arrow.core.raise.ensureNotNull
 import com.ivy.base.legacy.Transaction
 import com.ivy.base.model.TransactionType
 import com.ivy.base.time.TimeConverter
+import com.ivy.data.DataObserver
+import com.ivy.data.DataWriteEvent
 import com.ivy.data.backup.CSVRow
 import com.ivy.data.backup.ImportResult
+import com.ivy.data.db.DbTransactionRunner
 import com.ivy.data.db.dao.read.AccountDao
 import com.ivy.data.db.dao.read.SettingsDao
+import com.ivy.data.db.dao.read.TransactionDao
+import com.ivy.data.model.AccountId
 import com.ivy.data.model.Category
 import com.ivy.data.model.CategoryId
 import com.ivy.data.model.primitive.ColorInt
-import com.ivy.data.model.primitive.IconAsset
 import com.ivy.data.model.primitive.NotBlankTrimmedString
 import com.ivy.data.repository.AccountRepository
 import com.ivy.data.repository.CategoryRepository
@@ -32,264 +40,336 @@ import com.ivy.wallet.domain.pure.util.nextOrderNum
 import com.ivy.wallet.ui.theme.Green
 import com.ivy.wallet.ui.theme.IvyDark
 import kotlinx.collections.immutable.toImmutableList
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
+import java.time.Instant
 import java.util.UUID
 import javax.inject.Inject
-import kotlin.math.absoluteValue
+import kotlin.math.roundToLong
 import com.ivy.importdata.csv.CSVRow as CSVRowNew
 
+/**
+ * Two steps: [prepare] works out what a CSV import would do without touching the database, and
+ * [commit] saves the part the user kept in a single database transaction.
+ */
 class CSVImporterV2 @Inject constructor(
     private val settingsDao: SettingsDao,
     private val transactionRepository: TransactionRepository,
     private val transactionMapper: TransactionMapper,
+    private val transactionDao: TransactionDao,
     private val accountDao: AccountDao,
     private val categoryRepository: CategoryRepository,
     private val currencyRepository: CurrencyRepository,
     private val accountRepository: AccountRepository,
     private val timeConverter: TimeConverter,
+    private val transactionRunner: DbTransactionRunner,
+    private val dataObserver: DataObserver,
 ) {
 
-    lateinit var accounts: List<Account>
-    lateinit var categories: List<Category>
-
-    private var newCategoryColorIndex = 0
-    private var newAccountColorIndex = 0
-
-    suspend fun import(
+    /** Reads the wallet, never writes to it. */
+    suspend fun prepare(
         csv: List<CSVRowNew>,
         importantFields: ImportantFields,
         transferFields: TransferFields,
         optionalFields: OptionalFields,
         onProgress: suspend (progressPercent: Double) -> Unit,
-    ): ImportResult {
+    ): ImportPlan {
         val rows = csv.drop(1) // drop the header
-        val rowsCount = rows.size
+        val ctx = PlanContext(
+            baseCurrency = settingsDao.findFirst().currency,
+            accountOrderNum = accountDao.findMaxOrderNum(),
+            categoryOrderNum = categoryRepository.findMaxOrderNum(),
+        )
+        accountDao.findAll().map { it.toLegacyDomain() }.forEach {
+            ctx.accounts.putIfAbsent(it.name.toLowerCaseLocal(), it)
+        }
+        categoryRepository.findAll().forEach {
+            ctx.categories.putIfAbsent(it.name.value.toLowerCaseLocal(), it)
+        }
 
-        newCategoryColorIndex = 0
-        newAccountColorIndex = 0
-
-        accounts = accountDao.findAll().map { it.toLegacyDomain() }
-        val initialAccountsCount = accounts.size
-
-        categories = categoryRepository.findAll()
-        val initialCategoriesCount = categories.size
-
-        val baseCurrency = settingsDao.findFirst().currency
-
-        val failedRows = mutableListOf<CSVRow>()
-
-        val transactions = rows.mapIndexedNotNull { index, row ->
-            val progressPercent = if (rowsCount > 0) {
-                index / rowsCount.toDouble()
-            } else {
-                0.0
-            }
-            onProgress(progressPercent / 2)
-
-            val transaction = mapToTransaction(
-                baseCurrency = baseCurrency,
+        val planned = mutableListOf<PlannedRow>()
+        val rejected = mutableListOf<RejectedRow>()
+        rows.forEachIndexed { index, row ->
+            onProgress(index / rows.size.toDouble())
+            // + 2 because the header is line 1 and lines start at 1; only a fallback for rows
+            // that didn't come from the file parser.
+            val line = row.line.takeIf { it > 0 } ?: (index + 2)
+            val result = planRow(
+                ctx = ctx,
+                line = line,
+                row = row,
                 importantFields = importantFields,
                 transferFields = transferFields,
                 optionalFields = optionalFields,
-                row = row,
             )
-
-            if (transaction == null) {
-                failedRows.add(
-                    CSVRow(
-                        index = index + 2, // + 1 because we skip Header and +1 because they don't start from zero
-                        content = row.values
-                    )
-                )
-            }
-            transaction
-        }
-
-        for ((index, transaction) in transactions.withIndex()) {
-            val progressPercent = if (rowsCount > 0) {
-                index / transactions.size.toDouble()
-            } else {
-                0.0
-            }
-            onProgress(0.5 + progressPercent / 2)
-            with(transactionMapper) {
-                transaction.toEntity().toDomain().getOrNull()?.let {
-                    transactionRepository.save(it)
+            when (result) {
+                is Either.Left -> rejected.add(RejectedRow(line, result.value, row.values))
+                is Either.Right -> {
+                    // Only now, so a rejected row never leaves an account or category behind.
+                    result.value.newAccounts.forEach { ctx.pendingAccounts[it.name.toLowerCaseLocal()] = it }
+                    result.value.newCategory?.let { ctx.pendingCategories[it.name.toLowerCaseLocal()] = it }
+                    planned.add(result.value.row)
                 }
             }
         }
 
-        return ImportResult(
-            rowsFound = rowsCount,
-            transactionsImported = transactions.size,
-            accountsImported = accounts.size - initialAccountsCount,
-            categoriesImported = categories.size - initialCategoriesCount,
-            failedRows = failedRows.toImmutableList()
+        return ImportPlan(
+            rowsFound = rows.size,
+            rows = flagDuplicates(planned),
+            rejected = rejected,
+            newAccounts = ctx.pendingAccounts.values.toList(),
+            newCategories = ctx.pendingCategories.values.toList(),
         )
     }
 
-    private suspend fun mapToTransaction(
-        baseCurrency: String,
+    /**
+     * Saves the rows the user kept (not in [excludedLines]) plus the accounts and categories only
+     * those rows need, all in one database transaction. Throws if anything fails, and then
+     * nothing has been saved.
+     */
+    suspend fun commit(
+        plan: ImportPlan,
+        excludedLines: Set<Int>,
+        onProgress: suspend (progressPercent: Double) -> Unit,
+    ): ImportResult {
+        val selection = plan.select(excludedLines)
+        try {
+            transactionRunner.run {
+                accountRepository.saveMany(selection.accounts.map { it.account })
+                categoryRepository.saveMany(selection.categories.map { it.category })
+                val transactions = selection.rows.map { row ->
+                    with(transactionMapper) { row.transaction.toEntity().toDomain() }
+                        .getOrElse { error("Line ${row.line} can't be saved: $it") }
+                }
+                transactions.chunked(SAVE_CHUNK).forEachIndexed { index, chunk ->
+                    onProgress(index * SAVE_CHUNK / transactions.size.toDouble())
+                    transactionRepository.saveMany(chunk)
+                }
+            }
+        } finally {
+            // Also after a rollback: the repositories cache what they saved inside the transaction.
+            withContext(NonCancellable) { dataObserver.post(DataWriteEvent.AllDataChange) }
+        }
+
+        return ImportResult(
+            // Rows the user excluded are neither imported nor failed, so they aren't counted.
+            rowsFound = selection.rows.size + plan.rejected.size,
+            transactionsImported = selection.rows.size,
+            accountsImported = selection.accounts.size,
+            categoriesImported = selection.categories.size,
+            failedRows = plan.rejected.map { CSVRow(index = it.line, content = it.content) }
+                .toImmutableList(),
+        )
+    }
+
+    private class PlanContext(
+        val baseCurrency: String,
+        var accountOrderNum: Double?,
+        var categoryOrderNum: Double,
+    ) {
+        val accounts = mutableMapOf<String, Account>()
+        val categories = mutableMapOf<String, Category>()
+        val pendingAccounts = linkedMapOf<String, PlannedAccount>()
+        val pendingCategories = linkedMapOf<String, PlannedCategory>()
+        var newCategoryColorIndex = 0
+        var newAccountColorIndex = 0
+    }
+
+    private class AccountRef(val name: String, val currency: String, val id: UUID?, val pending: Boolean)
+
+    private class RowPlan(
+        val row: PlannedRow,
+        val newAccounts: List<PlannedAccount>,
+        val newCategory: PlannedCategory?,
+    )
+
+    private suspend fun planRow(
+        ctx: PlanContext,
+        line: Int,
         row: CSVRowNew,
         importantFields: ImportantFields,
         transferFields: TransferFields,
         optionalFields: OptionalFields,
-    ): Transaction? {
-        val type = parseTransactionType(
-            value = row.extractValue(importantFields.type),
-            metadata = importantFields.type.metadata,
-        ) ?: return null
+    ): Either<String, RowPlan> = either {
+        val rawType = row.extractValue(importantFields.type)
+        val type = parseTransactionType(rawType, importantFields.type.metadata)
+        ensureNotNull(type) { "Can't tell if '$rawType' is income, expense or a transfer" }
 
-        val toAccount = if (type == TransactionType.TRANSFER) {
-            mapAccount(
-                baseCurrency = baseCurrency,
-                accountNameString = parseToAccount(
-                    value = row.extractValue(transferFields.toAccount),
-                    metadata = transferFields.toAccount.metadata
+        val rawDate = row.extractValue(importantFields.date)
+        val dateTime = parseDate(rawDate, importantFields.date.metadata)
+        ensureNotNull(dateTime) { "Invalid date '$rawDate'" }
+
+        val rawAmount = row.extractValue(importantFields.amount)
+        val amount = parsePositiveAmount(rawAmount, importantFields.amount.metadata)
+        ensureNotNull(amount) { "Invalid amount '$rawAmount'" }
+
+        val from = resolveAccount(
+            ctx = ctx,
+            name = parseAccount(
+                row.extractValue(importantFields.account),
+                importantFields.account.metadata
+            ),
+            currencyRaw = parseAccountCurrency(
+                row.extractValue(importantFields.accountCurrency),
+                importantFields.accountCurrency.metadata
+            ),
+        )
+        ensureNotNull(from) { "Missing account" }
+
+        val to = if (type == TransactionType.TRANSFER) {
+            resolveAccount(
+                ctx = ctx,
+                name = parseToAccount(
+                    row.extractValue(transferFields.toAccount),
+                    transferFields.toAccount.metadata
                 ),
-                currencyRawString = parseToAccountCurrency(
-                    value = row.extractValue(transferFields.toAccountCurrency),
-                    metadata = transferFields.toAccountCurrency.metadata
+                currencyRaw = parseToAccountCurrency(
+                    row.extractValue(transferFields.toAccountCurrency),
+                    transferFields.toAccountCurrency.metadata
                 ) ?: parseAccountCurrency(
-                    value = row.extractValue(importantFields.accountCurrency),
-                    metadata = importantFields.accountCurrency.metadata,
+                    row.extractValue(importantFields.accountCurrency),
+                    importantFields.accountCurrency.metadata,
                 ),
-                color = null,
-                icon = null,
-                orderNum = null,
             )
         } else {
             null
         }
-
-        val csvAmount = if (type != TransactionType.TRANSFER) {
-            parseAmount(
-                value = row.extractValue(importantFields.amount),
-                metadata = importantFields.amount.metadata
-            )
-        } else {
-            parseAmount(
-                value = row.extractValue(transferFields.toAmount),
-                metadata = transferFields.toAmount.metadata
-            )
-        } ?: return null
-        val amount = csvAmount.absoluteValue
-
-        if (amount <= 0) {
-            // Cannot save transactions with zero amount
-            return null
-        }
-
         val toAmount = if (type == TransactionType.TRANSFER) {
-            parseAmount(
-                value = row.extractValue(transferFields.toAmount),
-                metadata = transferFields.toAmount.metadata
-            )
+            ensureNotNull(to) { "Transfer is missing the destination account" }
+            ensure(from.name.toLowerCaseLocal() != to.name.toLowerCaseLocal()) {
+                "Transfer from and to the same account '${from.name}'"
+            }
+            val rawToAmount = row.extractValue(transferFields.toAmount)
+            if (rawToAmount.isBlank()) {
+                // Without a destination amount only a same-currency transfer is unambiguous.
+                ensure(from.currency.equals(to.currency, ignoreCase = true)) {
+                    "Missing destination amount for a ${from.currency} to ${to.currency} transfer"
+                }
+                amount
+            } else {
+                val parsed = parsePositiveAmount(rawToAmount, transferFields.toAmount.metadata)
+                ensureNotNull(parsed) { "Invalid destination amount '$rawToAmount'" }
+                parsed
+            }
         } else {
             null
         }
 
-        val dateTime = parseDate(
-            row.extractValue(importantFields.date),
-            importantFields.date.metadata
-        ) ?: return null
+        // Validated; from here on we only build what the row needs.
+        val created = mutableListOf<PlannedAccount>()
+        suspend fun idOf(ref: AccountRef): UUID = ref.id
+            ?: newAccount(ctx, ref)?.also(created::add)?.account?.id?.value
+            ?: raise("Couldn't create the account '${ref.name}'")
+        val fromId = idOf(from)
+        val toId = to?.let { idOf(it) }
 
-        val account = mapAccount(
-            baseCurrency = baseCurrency,
-            accountNameString = parseAccount(
-                value = row.extractValue(importantFields.account),
-                metadata = importantFields.account.metadata
-            ),
-            currencyRawString = parseAccountCurrency(
-                value = row.extractValue(importantFields.accountCurrency),
-                metadata = importantFields.accountCurrency.metadata
-            ),
-            color = null,
-            icon = null,
-            orderNum = null,
-        ) ?: return null
+        val categoryName = parseCategory(
+            row.extractValue(optionalFields.category),
+            optionalFields.category.metadata
+        )
+        val categoryKey = categoryName?.toLowerCaseLocal()
+        val existingCategoryId = categoryKey?.let { ctx.categories[it]?.id?.value }
+        val pendingCategory = categoryKey?.let { ctx.pendingCategories[it] }
+        val newCategory = if (categoryName != null && existingCategoryId == null && pendingCategory == null) {
+            newCategory(ctx, categoryName)
+        } else {
+            null
+        }
 
-        val category = mapCategory(
-            categoryNameString = parseCategory(
-                value = row.extractValue(optionalFields.category),
-                metadata = optionalFields.category.metadata
-            ),
-            color = null,
-            icon = null,
-            orderNum = null,
-        )
-        val title = parseTitle(
-            row.extractValue(optionalFields.title),
-            optionalFields.title.metadata
-        )
-        val description = parseTitle(
-            row.extractValue(optionalFields.description),
-            optionalFields.description.metadata
-        )
-
-        return Transaction(
+        val transaction = Transaction(
             id = UUID.randomUUID(),
             type = type,
             amount = amount.toBigDecimal(),
-            accountId = account.id,
-            toAccountId = toAccount?.id,
-            toAmount = toAmount?.toBigDecimal() ?: amount.toBigDecimal(),
+            accountId = fromId,
+            toAccountId = toId,
+            toAmount = (toAmount ?: amount).toBigDecimal(),
             dateTime = with(timeConverter) { dateTime.toUTC() },
             dueDate = null,
-            categoryId = category?.id?.value,
-            title = title,
-            description = description
+            categoryId = existingCategoryId ?: (pendingCategory ?: newCategory)?.category?.id?.value,
+            title = parseTitle(row.extractValue(optionalFields.title), optionalFields.title.metadata),
+            description = parseDescription(
+                row.extractValue(optionalFields.description),
+                optionalFields.description.metadata
+            ),
+        )
+        RowPlan(
+            row = PlannedRow(
+                line = line,
+                transaction = transaction,
+                date = dateTime,
+                accountName = from.name,
+                currency = from.currency,
+                toAccountName = to?.name,
+                toCurrency = to?.currency,
+                categoryName = categoryName,
+                newAccountIds = setOfNotNull(
+                    from.id.takeIf { from.pending }?.let(::AccountId),
+                    to?.id?.takeIf { to.pending }?.let(::AccountId),
+                ) + created.map { it.account.id },
+                newCategory = (pendingCategory ?: newCategory)?.category?.id,
+                duplicate = null,
+            ),
+            newAccounts = created,
+            newCategory = newCategory,
         )
     }
 
-    private suspend fun mapAccount(
-        baseCurrency: String,
-        accountNameString: String?,
-        color: Int?,
-        icon: String?,
-        orderNum: Double?,
-        currencyRawString: String?,
-    ): Account? {
-        if (accountNameString == null || accountNameString.isBlank()) return null
+    /** Parses like the other amounts but also refuses zero, so nothing unsaveable gets through. */
+    private fun parsePositiveAmount(raw: String, multiplier: Int): Double? =
+        parseAmount(raw, multiplier)?.takeIf { it.isFinite() && it > 0 }
 
-        val existingAccount = accounts.firstOrNull {
-            accountNameString.toLowerCaseLocal() == it.name.toLowerCaseLocal()
+    private fun resolveAccount(ctx: PlanContext, name: String?, currencyRaw: String?): AccountRef? {
+        if (name.isNullOrBlank()) return null
+        val key = name.toLowerCaseLocal()
+        val existing = ctx.accounts[key]
+        val pending = ctx.pendingAccounts[key]
+        return when {
+            existing != null ->
+                AccountRef(existing.name, existing.currency ?: ctx.baseCurrency, existing.id, pending = false)
+
+            pending != null ->
+                AccountRef(pending.name, pending.currency, pending.account.id.value, pending = true)
+
+            else -> AccountRef(name, mapCurrency(ctx.baseCurrency, currencyRaw), id = null, pending = false)
         }
-        if (existingAccount != null) {
-            return existingAccount
-        }
+    }
 
-        // create new account
-        val colorArgb = color ?: when {
-            accountNameString.toLowerCaseLocal().contains("cash") -> {
-                Green
-            }
-
-            accountNameString.toLowerCaseLocal().contains("revolut") -> {
-                IvyDark
-            }
-
-            else -> IVY_COLOR_PICKER_COLORS_FREE.getOrElse(newAccountColorIndex++) {
-                newAccountColorIndex = 0
+    private suspend fun newAccount(ctx: PlanContext, ref: AccountRef): PlannedAccount? {
+        val name = ref.name.toLowerCaseLocal()
+        val color = when {
+            name.contains("cash") -> Green
+            name.contains("revolut") -> IvyDark
+            else -> IVY_COLOR_PICKER_COLORS_FREE.getOrElse(ctx.newAccountColorIndex++) {
+                ctx.newAccountColorIndex = 0
                 IVY_COLOR_PICKER_COLORS_FREE.first()
             }
         }.toArgb()
-
-        val newAccount = Account(
-            name = accountNameString,
-            currency = mapCurrency(
-                baseCurrency = baseCurrency,
-                currencyCode = currencyRawString
-            ),
-            color = colorArgb,
-            icon = icon,
-            orderNum = orderNum ?: accountDao.findMaxOrderNum().nextOrderNum()
+        val orderNum = ctx.accountOrderNum.nextOrderNum().also { ctx.accountOrderNum = it }
+        val account = Account(
+            name = ref.name,
+            currency = ref.currency,
+            color = color,
+            orderNum = orderNum,
         )
-        val domainAccount = newAccount.toDomainAccount(currencyRepository).getOrNull()
-            ?: return null
-        accountRepository.save(domainAccount)
-        accounts = accountDao.findAll().map { it.toLegacyDomain() }
+        val domain = account.toDomainAccount(currencyRepository).getOrNull() ?: return null
+        return PlannedAccount(ref.name, ref.currency, domain)
+    }
 
-        return newAccount
+    private fun newCategory(ctx: PlanContext, name: String): PlannedCategory? {
+        val color = IVY_COLOR_PICKER_COLORS_FREE.getOrElse(ctx.newCategoryColorIndex++) {
+            ctx.newCategoryColorIndex = 0
+            IVY_COLOR_PICKER_COLORS_FREE.first()
+        }.toArgb()
+        val category = either {
+            Category(
+                id = CategoryId(UUID.randomUUID()),
+                name = NotBlankTrimmedString.from(name).bind(),
+                color = ColorInt(color),
+                icon = null,
+                orderNum = ctx.categoryOrderNum.nextOrderNum().also { ctx.categoryOrderNum = it },
+            )
+        }.getOrNull() ?: return null
+        return PlannedCategory(name, category)
     }
 
     private fun mapCurrency(
@@ -307,42 +387,62 @@ class CSVImporterV2 @Inject constructor(
         }
     }
 
-    private suspend fun mapCategory(
-        categoryNameString: String?,
-        color: Int?,
-        icon: String?,
-        orderNum: Double?
-    ): Category? {
-        if (categoryNameString == null || categoryNameString.isBlank()) return null
-
-        val existingCategory = categories.firstOrNull {
-            categoryNameString.toLowerCaseLocal() == it.name.value.toLowerCaseLocal()
-        }
-        if (existingCategory != null) {
-            return existingCategory
-        }
-
-        // create new category
-        val colorArgb = color ?: IVY_COLOR_PICKER_COLORS_FREE.getOrElse(newCategoryColorIndex++) {
-            newCategoryColorIndex = 0
-            IVY_COLOR_PICKER_COLORS_FREE.first()
-        }.toArgb()
-
-        val newCategory: Category? = either {
-            Category(
-                id = CategoryId(UUID.randomUUID()),
-                name = NotBlankTrimmedString.from(categoryNameString).bind(),
-                color = ColorInt(colorArgb),
-                icon = icon?.let(IconAsset::from)?.getOrNull(),
-                orderNum = orderNum ?: categoryRepository.findMaxOrderNum().nextOrderNum(),
+    /**
+     * Marks rows that match a transaction already in the wallet or an earlier row of the file.
+     * Identical rows can be legitimate (two coffees), so this only informs the user.
+     */
+    private suspend fun flagDuplicates(rows: List<PlannedRow>): List<PlannedRow> {
+        if (rows.isEmpty()) return rows
+        val times = rows.mapNotNull { it.transaction.dateTime }
+        val inWallet = transactionDao.findAllBetween(times.min(), times.max())
+            .mapTo(mutableSetOf()) {
+                DuplicateKey(
+                    type = it.type,
+                    account = AccountId(it.accountId),
+                    toAccount = it.toAccountId?.let(::AccountId),
+                    amount = it.amount.cents(),
+                    toAmount = if (it.toAccountId != null) it.toAmount?.cents() else null,
+                    dateTime = it.dateTime,
+                    title = it.title.normalized(),
+                )
+            }
+        val firstLineInFile = mutableMapOf<DuplicateKey, Int>()
+        return rows.map { row ->
+            val t = row.transaction
+            val key = DuplicateKey(
+                type = t.type,
+                account = AccountId(t.accountId),
+                toAccount = t.toAccountId?.let(::AccountId),
+                amount = t.amount.toDouble().cents(),
+                toAmount = if (t.toAccountId != null) t.toAmount.toDouble().cents() else null,
+                dateTime = t.dateTime,
+                title = t.title.normalized(),
             )
-        }.getOrNull()
-
-        if (newCategory != null) {
-            categoryRepository.save(newCategory)
-            categories = categoryRepository.findAll()
+            val earlier = firstLineInFile.putIfAbsent(key, row.line)
+            when {
+                key in inWallet -> row.copy(duplicate = Duplicate(inFileLine = null))
+                earlier != null -> row.copy(duplicate = Duplicate(inFileLine = earlier))
+                else -> row
+            }
         }
+    }
 
-        return newCategory
+    private data class DuplicateKey(
+        val type: TransactionType,
+        val account: AccountId,
+        val toAccount: AccountId?,
+        val amount: Long,
+        val toAmount: Long?,
+        val dateTime: Instant?,
+        val title: String,
+    )
+
+    private fun Double.cents(): Long = (this * CENTS_PER_UNIT).roundToLong()
+
+    private fun String?.normalized(): String = this?.trim()?.lowercase().orEmpty()
+
+    private companion object {
+        const val SAVE_CHUNK = 500
+        const val CENTS_PER_UNIT = 100
     }
 }
