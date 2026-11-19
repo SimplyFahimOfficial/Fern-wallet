@@ -352,6 +352,7 @@ fun CreditCardStatementUiTest(isDark: Boolean) {
                 rows = CardSamples.rows.drop(2).toImmutableList(),
                 issuerForm = null,
                 invalidAmount = false,
+                dueBeforeClosing = false,
                 today = CardSamples.today,
             ),
             onEvent = {}

@@ -414,4 +414,62 @@ class CreditCardCalculatorTest {
         jan.status shouldBe StatementStatus.CARRIED_FORWARD
         result.urgentStatement shouldBe feb
     }
+
+    // region Issuer difference
+    private fun issuerOverride(balance: String?) = StatementOverride(
+        accountId = accountId,
+        nominalClosingDate = LocalDate.parse("2026-01-15"),
+        actualClosingDate = null,
+        actualDueDate = null,
+        issuerStatementBalance = balance?.let(::BigDecimal),
+        minimumDue = null,
+    )
+
+    private fun january(ledger: List<CardLedgerEntry>, issuer: String?): CardStatement =
+        calc(ledger = ledger, today = "2026-01-25", overrides = listOf(issuerOverride(issuer))).statements.single()
+
+    @Test
+    fun `issuer balance higher than the calculated closing balance`() {
+        val statement = january(listOf(e("2026-01-10", "4550", CHARGE)), issuer = "5000")
+
+        statement.issuerDifference!! shouldBeEqualComparingTo BigDecimal("450")
+        statement.statementBalance shouldBeEqualComparingTo BigDecimal("4550")
+    }
+
+    @Test
+    fun `issuer balance lower than the calculated closing balance`() {
+        january(listOf(e("2026-01-10", "4550", CHARGE)), issuer = "4000").issuerDifference!! shouldBeEqualComparingTo
+            BigDecimal("-550")
+    }
+
+    @Test
+    fun `numerically equal balances have no difference whatever their scale`() {
+        val statement = january(listOf(e("2026-01-10", "100.0", CHARGE)), issuer = "100.00")
+
+        statement.issuerDifference!!.signum() shouldBe 0
+    }
+
+    @Test
+    fun `no issuer balance means no comparison`() {
+        january(listOf(e("2026-01-10", "4550", CHARGE)), issuer = null).issuerDifference shouldBe null
+    }
+
+    @Test
+    fun `a payment after closing does not change the historical difference`() {
+        val charge = e("2026-01-10", "4550", CHARGE)
+        val before = january(listOf(charge), issuer = "5000")
+        val after = january(listOf(charge, e("2026-01-20", "4550", PAYMENT)), issuer = "5000")
+
+        after.issuerDifference!! shouldBeEqualComparingTo before.issuerDifference!!
+        after.remainingDue shouldBeEqualComparingTo BigDecimal("450")
+    }
+
+    @Test
+    fun `correcting a transaction inside the cycle changes the difference`() {
+        january(listOf(e("2026-01-10", "4550", CHARGE)), issuer = "5000").issuerDifference!! shouldBeEqualComparingTo
+            BigDecimal("450")
+        january(listOf(e("2026-01-10", "4950", CHARGE)), issuer = "5000").issuerDifference!! shouldBeEqualComparingTo
+            BigDecimal("50")
+    }
+    // endregion
 }

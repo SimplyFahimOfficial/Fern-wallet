@@ -48,8 +48,11 @@ Cards use the same ledger as every other account.
   - *N days after the statement date*
   - *a day of the month*: the first such day after the statement date, moved to the last day of the month when needed
 - If the user enters the actual dates from the bank, those replace the calculated dates for that statement.
+  - A date left empty is derived the usual way: the statement date from the statement day, the due date from the due-date rule (counted from the actual statement date if one was entered).
+  - The due date can't be earlier than the statement date. The form stays open and the due-date field shows the error. A saved override that is already invalid can still be opened, corrected or cleared.
 - **Statement balance** = previous balance + opening amount in the period + charges − refunds − payments.
-  - If the user enters the bank's statement balance, it replaces the calculated one.
+  - If the user enters the bank's statement balance, it replaces the calculated one for "remaining due".
+  - The statement screen also compares the bank's balance with Fern Wallet's calculated balance at closing (the one that ignores the override): **Matched**, or "Bank statement is X higher/lower than your records". Payments made after closing don't affect this difference, and it is informational only: nothing is added to the ledger.
 - **Remaining due** = statement balance − payments and refunds made after the statement date, up to today. It is never below 0.
 - **Statement status** is one of:
   - Nothing due
@@ -63,9 +66,9 @@ All money is calculated with `BigDecimal`. Fern Wallet calculates statements fro
 
 ## Reminders
 
-- A daily WorkManager job checks each card's latest statement.
-- It shows one "due soon" notification N days before the due date (N is set per card, 0–10) and one on the due date.
-- Notifications are de-duplicated per card, due date and kind. They are cleared once the statement is paid.
+- A daily WorkManager job checks **every unpaid statement** of each card, not only the latest. With a long due-date rule (up to 60 days) an older bill can still be ahead of its due date after the next statement has closed, and it keeps its own reminders.
+- For each unpaid statement it shows one "due soon" notification N days before that statement's due date (N is set per card, 0–10) and one on the due date. Two statements with the same due date share one reminder.
+- Notifications are de-duplicated per card, due date and kind. A notification is cleared when its statement is paid, when an issuer override moves its due date, or when reminders are turned off or the card is closed.
 - Reminders are skipped when notifications are turned off in Settings, when the card's reminders are off, or when the card is closed.
 
 ## Known limitations

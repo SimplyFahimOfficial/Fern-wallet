@@ -181,6 +181,15 @@ See `PLAN.md` for the decisions behind each item.
   generic Fern illustration; no bank or network logos are bundled.
 - Database 130 → 131 is an additive migration; backups include card data, and older backups still import.
 
+### Credit card statements
+- Entering a bank due date earlier than the statement date is refused: the form stays open and the due-date
+  field shows the error. If only one date is entered, the other is derived from the card's rules first. A
+  saved override that is already invalid can still be edited or cleared.
+- The statement screen compares the bank's total due with Fern Wallet's calculated balance at closing and says
+  **Matched** or how much higher or lower the bank figure is. Later payments don't change it; correcting a
+  transaction in the period does. It is information only and never adds a transaction.
+- `docs/Credit-Cards.md`: the reminder section now describes how unpaid statements are checked.
+
 ### Fixes
 - Amount shortening: `999,999` showed `1000.00k` (now `1m`), small amounts showed `500.0`/scientific notation,
   the decimal separator ignored the locale.

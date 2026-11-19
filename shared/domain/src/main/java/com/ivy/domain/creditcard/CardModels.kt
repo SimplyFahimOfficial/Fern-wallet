@@ -77,6 +77,15 @@ data class CardStatement(
     val isLatest: Boolean,
     val entries: List<CardLedgerEntry>,
 ) {
+    /**
+     * Issuer statement balance minus the balance Fern Wallet calculated at closing, or null when
+     * no issuer balance was entered. Compares with [statementBalance], which an issuer override
+     * never changes, and not with [remainingDue], so a payment made after closing doesn't show up
+     * as a discrepancy. Use the sign, not the scale: 100.0 and 100.00 are equal.
+     */
+    val issuerDifference: BigDecimal?
+        get() = issuerStatementBalance?.subtract(statementBalance)
+
     /** The amount the user has to pay for this statement. */
     val amountDue: BigDecimal
         get() = (issuerStatementBalance ?: statementBalance).max(BigDecimal.ZERO)

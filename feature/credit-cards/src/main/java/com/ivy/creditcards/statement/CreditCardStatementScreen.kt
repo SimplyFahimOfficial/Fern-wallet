@@ -39,6 +39,7 @@ import com.ivy.domain.creditcard.CardStatement
 import com.ivy.navigation.CreditCardStatementScreen
 import com.ivy.navigation.navigation
 import com.ivy.ui.R
+import java.math.BigDecimal
 
 @Composable
 fun CreditCardStatementScreenImpl(screen: CreditCardStatementScreen) {
@@ -88,7 +89,7 @@ internal fun CreditCardStatementUi(state: StatementState, onEvent: (StatementEve
         }
     }
 
-    state.issuerForm?.let { form -> IssuerDialog(form, state.invalidAmount, state.currency, onEvent) }
+    state.issuerForm?.let { form -> IssuerDialog(form, state, onEvent) }
 }
 
 @Composable
@@ -132,6 +133,7 @@ private fun Breakdown(state: StatementState, s: CardStatement) {
                 note = stringResource(R.string.cc_from_issuer),
             )
         }
+        s.issuerDifference?.let { IssuerComparison(it, c) }
         s.minimumDue?.let {
             AmountLine(
                 stringResource(R.string.cc_minimum_due),
@@ -159,8 +161,31 @@ private fun Breakdown(state: StatementState, s: CardStatement) {
     }
 }
 
+/** Bank statement against Fern Wallet's calculation. Informational: nothing is written. */
 @Composable
-private fun IssuerDialog(form: IssuerForm, invalid: Boolean, currency: String, onEvent: (StatementEvent) -> Unit) {
+private fun IssuerComparison(difference: BigDecimal, currency: String) {
+    if (difference.signum() == 0) {
+        AmountLine(
+            label = stringResource(R.string.cc_compared_with_records),
+            value = stringResource(R.string.cc_matched),
+        )
+        return
+    }
+    val amount = difference.abs().money(currency)
+    Text(
+        text = if (difference.signum() > 0) {
+            stringResource(R.string.cc_bank_higher, amount)
+        } else {
+            stringResource(R.string.cc_bank_lower, amount)
+        },
+        style = UI.typo.b2.style(color = UI.colors.orange, fontWeight = FontWeight.Bold),
+    )
+    Text(stringResource(R.string.cc_difference_note), style = UI.typo.nC.style(color = UI.colors.gray))
+}
+
+@Composable
+private fun IssuerDialog(form: IssuerForm, state: StatementState, onEvent: (StatementEvent) -> Unit) {
+    val currency = state.currency
     AlertDialog(
         onDismissRequest = { onEvent(StatementEvent.DismissIssuerValues) },
         title = { Text(stringResource(R.string.cc_issuer_values_title)) },
@@ -177,6 +202,7 @@ private fun IssuerDialog(form: IssuerForm, invalid: Boolean, currency: String, o
                     label = stringResource(R.string.cc_actual_due_date),
                     date = form.actualDueDate,
                     placeholder = stringResource(R.string.cc_use_calculated),
+                    error = if (state.dueBeforeClosing) stringResource(R.string.cc_error_due_before_closing) else null,
                     onDate = { onEvent(StatementEvent.UpdateIssuerForm(form.copy(actualDueDate = it))) },
                 )
                 FormField(
@@ -192,7 +218,7 @@ private fun IssuerDialog(form: IssuerForm, invalid: Boolean, currency: String, o
                     label = stringResource(R.string.cc_minimum_due),
                     keyboardType = KeyboardType.Decimal,
                     prefix = "$currency ",
-                    error = if (invalid) stringResource(R.string.cc_error_amount) else null,
+                    error = if (state.invalidAmount) stringResource(R.string.cc_error_amount) else null,
                 )
             }
         },

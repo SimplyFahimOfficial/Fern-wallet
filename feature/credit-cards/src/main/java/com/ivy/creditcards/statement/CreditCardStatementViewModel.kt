@@ -12,6 +12,7 @@ import com.ivy.creditcards.details.CardRowsBuilder
 import com.ivy.creditcards.details.CardTransactionRow
 import com.ivy.creditcards.edit.CardFormValidator
 import com.ivy.data.model.AccountId
+import com.ivy.data.model.creditcard.DueDateRule
 import com.ivy.data.model.creditcard.StatementOverride
 import com.ivy.data.repository.CreditCardRepository
 import com.ivy.domain.creditcard.CardStatement
@@ -47,6 +48,8 @@ data class StatementState(
     val rows: ImmutableList<CardTransactionRow>,
     val issuerForm: IssuerForm?,
     val invalidAmount: Boolean,
+    /** The due date the form would save is earlier than the statement date. */
+    val dueBeforeClosing: Boolean,
     val today: LocalDate,
 )
 
@@ -78,6 +81,8 @@ class CreditCardStatementViewModel @Inject constructor(
     private var rows by mutableStateOf<List<CardTransactionRow>>(emptyList())
     private var issuerForm by mutableStateOf<IssuerForm?>(null)
     private var invalidAmount by mutableStateOf(false)
+    private var dueBeforeClosing by mutableStateOf(false)
+    private var dueRule: DueDateRule? = null
 
     fun start(screen: CreditCardStatementScreen) {
         this.screen = screen
@@ -92,6 +97,7 @@ class CreditCardStatementViewModel @Inject constructor(
             val found = item?.overview?.statements?.firstOrNull { it.nominalClosingDate == nominal }
             cardName = item?.account?.name?.value.orEmpty()
             currency = item?.account?.asset?.code.orEmpty()
+            dueRule = item?.card?.dueDateRule
             statement = found
             val ids = found?.entries?.mapNotNull { it.transactionId?.value }?.toSet().orEmpty()
             rows = item?.let { rowsBuilder.rows(it) }.orEmpty().filter { it.id in ids }
@@ -100,7 +106,9 @@ class CreditCardStatementViewModel @Inject constructor(
     }
 
     @Composable
-    override fun uiState(): StatementState = StatementState(
+    override fun uiState(): StatementState = state()
+
+    internal fun state(): StatementState = StatementState(
         loading = loading,
         cardName = cardName,
         currency = currency,
@@ -108,6 +116,7 @@ class CreditCardStatementViewModel @Inject constructor(
         rows = rows.toImmutableList().ifEmpty { persistentListOf() },
         issuerForm = issuerForm,
         invalidAmount = invalidAmount,
+        dueBeforeClosing = dueBeforeClosing,
         today = timeProvider.localDateNow(),
     )
 
@@ -124,8 +133,12 @@ class CreditCardStatementViewModel @Inject constructor(
             StatementEvent.DismissIssuerValues -> {
                 issuerForm = null
                 invalidAmount = false
+                dueBeforeClosing = false
             }
-            is StatementEvent.UpdateIssuerForm -> issuerForm = event.form
+            is StatementEvent.UpdateIssuerForm -> {
+                issuerForm = event.form
+                dueBeforeClosing = false
+            }
             StatementEvent.SaveIssuerValues -> save(clear = false)
             StatementEvent.ClearIssuerValues -> save(clear = true)
             is StatementEvent.OpenTransaction -> navigation.navigateTo(
@@ -142,13 +155,19 @@ class CreditCardStatementViewModel @Inject constructor(
         val minimum = form.minimumDue.takeIf { it.isNotBlank() }?.let(CardFormValidator::parseAmount)
         val badAmount = (form.issuerBalance.isNotBlank() && balance == null) ||
             (form.minimumDue.isNotBlank() && (minimum == null || minimum.signum() < 0))
-        if (!clear && badAmount) {
-            invalidAmount = true
-            return
-        }
+        val nominal = LocalDate.ofEpochDay(s.nominalClosingEpochDay)
+        // Clearing never validates: it is how an invalid override saved earlier gets removed.
+        val badDates = !clear && StatementDateValidator.dueBeforeClosing(
+            nominalClosing = nominal,
+            actualClosing = form.actualClosingDate,
+            actualDue = form.actualDueDate,
+            rule = dueRule,
+        )
+        invalidAmount = !clear && badAmount
+        dueBeforeClosing = badDates
+        if (invalidAmount || badDates) return
         viewModelScope.launch {
             val accountId = AccountId(s.accountId)
-            val nominal = LocalDate.ofEpochDay(s.nominalClosingEpochDay)
             if (clear) {
                 creditCardRepository.deleteStatementOverride(accountId, nominal)
             } else {
@@ -164,7 +183,6 @@ class CreditCardStatementViewModel @Inject constructor(
                 )
             }
             issuerForm = null
-            invalidAmount = false
             // Overrides are keyed by the nominal closing date, so the same screen reloads the
             // corrected period even when the actual closing date moved.
             reload()
