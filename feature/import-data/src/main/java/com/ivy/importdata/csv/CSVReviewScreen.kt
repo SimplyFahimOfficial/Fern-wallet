@@ -195,4 +195,5 @@ private val DateOnly = DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)
 private fun LocalDateTime.display(): String =
     if (toLocalTime() == LocalTime.MIDNIGHT) DateOnly.format(this) else DateAndTime.format(this)
 
-private fun BigDecimal.format(): String = DecimalFormat("#,##0.##").format(this)
+// Up to 8 decimals so small crypto amounts (0.001 BTC) are shown as they will be saved.
+private fun BigDecimal.format(): String = DecimalFormat("#,##0.########").format(this)

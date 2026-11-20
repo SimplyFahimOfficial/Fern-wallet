@@ -209,6 +209,16 @@ class CSVImporterV2Test {
     }
 
     @Test
+    fun `small crypto amounts are not mistaken for duplicates`() = runTest {
+        fixture.givenAccount("Coins", "BTC")
+        fun buy(amount: String) = row(type = "Expense", account = "Coins", amount = amount, title = "Buy")
+
+        val plan = fixture.prepare(buy("0.001"), buy("0.004"), buy("0.0010"))
+
+        plan.rows.map { it.duplicate } shouldBe listOf(null, null, Duplicate(inFileLine = 2))
+    }
+
+    @Test
     fun `a stored transfer without a destination amount matches the same transfer in the file`() = runTest {
         val wallet = fixture.givenAccount("Wallet", "USD")
         val savings = fixture.givenAccount("Savings", "USD")

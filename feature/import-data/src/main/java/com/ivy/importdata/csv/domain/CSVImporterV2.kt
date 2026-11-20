@@ -42,11 +42,12 @@ import com.ivy.wallet.ui.theme.IvyDark
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import java.math.BigDecimal
+import java.math.RoundingMode
 import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 import javax.inject.Inject
-import kotlin.math.roundToLong
 import com.ivy.importdata.csv.CSVRow as CSVRowNew
 
 /**
@@ -403,9 +404,9 @@ class CSVImporterV2 @Inject constructor(
                     type = it.type,
                     account = AccountId(it.accountId),
                     toAccount = it.toAccountId?.let(::AccountId),
-                    amount = it.amount.cents(),
+                    amount = it.amount.normalized(),
                     // A transfer without a destination amount credits the source amount.
-                    toAmount = if (it.toAccountId != null) (it.toAmount ?: it.amount).cents() else null,
+                    toAmount = if (it.toAccountId != null) (it.toAmount ?: it.amount).normalized() else null,
                     dateTime = it.dateTime,
                     title = it.title.normalized(),
                 )
@@ -418,8 +419,8 @@ class CSVImporterV2 @Inject constructor(
                 type = t.type,
                 account = AccountId(t.accountId),
                 toAccount = t.toAccountId?.let(::AccountId),
-                amount = t.amount.toDouble().cents(),
-                toAmount = if (t.toAccountId != null) t.toAmount.toDouble().cents() else null,
+                amount = t.amount.normalized(),
+                toAmount = if (t.toAccountId != null) t.toAmount.normalized() else null,
                 dateTime = t.dateTime,
                 title = t.title.normalized(),
             )
@@ -450,19 +451,22 @@ class CSVImporterV2 @Inject constructor(
         val type: TransactionType,
         val account: AccountId,
         val toAccount: AccountId?,
-        val amount: Long,
-        val toAmount: Long?,
+        val amount: BigDecimal,
+        val toAmount: BigDecimal?,
         val dateTime: Instant?,
         val title: String,
     )
 
-    private fun Double.cents(): Long = (this * CENTS_PER_UNIT).roundToLong()
+    // shortcut: amounts closer than 1e-8 count as equal (enough for BTC), not the full ETH precision.
+    private fun Double.normalized(): BigDecimal = BigDecimal.valueOf(this).normalized()
+
+    private fun BigDecimal.normalized(): BigDecimal = setScale(AMOUNT_SCALE, RoundingMode.HALF_UP).stripTrailingZeros()
 
     private fun String?.normalized(): String = this?.trim()?.lowercase().orEmpty()
 
     private companion object {
         const val SAVE_CHUNK = 500
-        const val CENTS_PER_UNIT = 100
+        const val AMOUNT_SCALE = 8
         val DUPLICATE_WINDOW_GAP: Duration = Duration.ofDays(31)
     }
 }
