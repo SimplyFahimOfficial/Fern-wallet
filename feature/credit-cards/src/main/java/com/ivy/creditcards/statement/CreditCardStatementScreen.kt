@@ -213,6 +213,7 @@ private fun IssuerDialog(form: IssuerForm, state: StatementState, onEvent: (Stat
                     label = stringResource(R.string.cc_issuer_statement_balance),
                     keyboardType = KeyboardType.Decimal,
                     prefix = "$currency ",
+                    enabled = !state.saving,
                 )
                 FormField(
                     value = form.minimumDue,
@@ -221,16 +222,18 @@ private fun IssuerDialog(form: IssuerForm, state: StatementState, onEvent: (Stat
                     keyboardType = KeyboardType.Decimal,
                     prefix = "$currency ",
                     error = if (state.invalidAmount) stringResource(R.string.cc_error_amount) else null,
+                    enabled = !state.saving,
                 )
             }
         },
         confirmButton = {
             TextButton(
-                onClick = { onEvent(StatementEvent.SaveIssuerValues) }
+                onClick = { onEvent(StatementEvent.SaveIssuerValues) },
+                enabled = !state.saving,
             ) { Text(stringResource(R.string.cc_save)) }
         },
         dismissButton = {
-            TextButton(onClick = { onEvent(StatementEvent.ClearIssuerValues) }) {
+            TextButton(onClick = { onEvent(StatementEvent.ClearIssuerValues) }, enabled = !state.saving) {
                 Text(stringResource(R.string.cc_clear_issuer_values))
             }
         }

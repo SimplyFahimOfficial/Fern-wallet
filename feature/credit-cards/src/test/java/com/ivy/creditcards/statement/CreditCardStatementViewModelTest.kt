@@ -219,62 +219,58 @@ class CreditCardStatementViewModelTest {
         coVerify(exactly = 0) { repository.saveStatementOverride(any()) }
     }
 
+    // region Saving is one step the form can't interrupt
     @Test
-    fun `dismissing the form while the dates are checked drops the result`() {
+    fun `the form is frozen while the dates are checked`() {
         gate = CompletableDeferred()
         submit(form(closing = "2026-01-20", due = "2026-01-19"))
+        viewModel.state().saving shouldBe true
 
+        viewModel.onEvent(StatementEvent.UpdateIssuerForm(form(closing = "2026-01-20", due = "2026-02-01")))
         viewModel.onEvent(StatementEvent.DismissIssuerValues)
+        viewModel.onEvent(StatementEvent.EditIssuerValues)
+        viewModel.state().issuerForm?.actualDueDate shouldBe LocalDate.of(2026, 1, 19)
+
         gate!!.complete(Unit)
 
-        viewModel.state().dueBeforeClosing shouldBe false
-        viewModel.state().issuerForm shouldBe null
+        // The check belongs to the form it started with, and the user can edit again afterwards.
+        viewModel.state().saving shouldBe false
+        viewModel.state().dueBeforeClosing shouldBe true
+        viewModel.state().issuerForm?.actualDueDate shouldBe LocalDate.of(2026, 1, 19)
         coVerify(exactly = 0) { repository.saveStatementOverride(any()) }
     }
 
     @Test
-    fun `editing the form while the dates are checked drops the result, and the new values are saved`() {
-        gate = CompletableDeferred()
+    fun `a form that failed its check can be corrected and saved`() {
         submit(form(closing = "2026-01-20", due = "2026-01-19"))
+        viewModel.state().saving shouldBe false
 
         viewModel.onEvent(StatementEvent.UpdateIssuerForm(form(closing = "2026-01-20", due = "2026-02-01")))
-        gate!!.complete(Unit)
-
-        viewModel.state().dueBeforeClosing shouldBe false
-        viewModel.state().issuerForm?.actualDueDate shouldBe LocalDate.of(2026, 2, 1)
-        coVerify(exactly = 0) { repository.saveStatementOverride(any()) }
-
         viewModel.onEvent(StatementEvent.SaveIssuerValues)
+
         coVerify(exactly = 1) { repository.saveStatementOverride(any()) }
         viewModel.state().issuerForm shouldBe null
     }
 
     @Test
-    fun `edits made while the write is pending are kept, and the statement still reloads`() {
-        writeGate = CompletableDeferred()
-        submit(form(balance = "100"))
-
-        viewModel.onEvent(StatementEvent.UpdateIssuerForm(form(balance = "200")))
-        writeGate!!.complete(Unit)
-
-        viewModel.state().issuerForm?.issuerBalance shouldBe "200"
-        coVerify(exactly = 1) { repository.saveStatementOverride(match { it.issuerStatementBalance?.toInt() == 100 }) }
-        difference()!! shouldBeEqualComparingTo BigDecimal("-4450")
-    }
-
-    @Test
-    fun `reopening the form while a clear is pending keeps it open`() {
+    fun `the form can't be changed while the write is pending and opens with the saved values after it`() {
         submit(form(balance = "5000"))
         writeGate = CompletableDeferred()
         viewModel.onEvent(StatementEvent.EditIssuerValues)
         viewModel.onEvent(StatementEvent.ClearIssuerValues)
 
+        // Dismissing and reopening during the clear changes nothing; it would have shown stale values.
+        viewModel.onEvent(StatementEvent.DismissIssuerValues)
         viewModel.onEvent(StatementEvent.EditIssuerValues)
+        viewModel.onEvent(StatementEvent.UpdateIssuerForm(form(balance = "200")))
+        viewModel.state().issuerForm?.issuerBalance shouldBe "5000"
         writeGate!!.complete(Unit)
 
-        // Reopened from what was saved at the time; the write finishing doesn't close it.
-        viewModel.state().issuerForm shouldBe form(balance = "5000")
         viewModel.state().statement!!.issuerStatementBalance shouldBe null
+        viewModel.state().issuerForm shouldBe null
+        viewModel.onEvent(StatementEvent.EditIssuerValues)
+        viewModel.state().issuerForm shouldBe form()
+        coVerify(exactly = 0) { repository.saveStatementOverride(match { it.issuerStatementBalance?.toInt() == 200 }) }
     }
 
     @Test
@@ -287,6 +283,7 @@ class CreditCardStatementViewModelTest {
 
         coVerify(exactly = 1) { repository.saveStatementOverride(any()) }
     }
+    // endregion
 
     @Test
     fun `an invalid saved override can be opened, corrected and cleared`() {

@@ -353,6 +353,7 @@ fun CreditCardStatementUiTest(isDark: Boolean) {
                 issuerForm = null,
                 invalidAmount = false,
                 dueBeforeClosing = false,
+                saving = false,
                 today = CardSamples.today,
             ),
             onEvent = {}

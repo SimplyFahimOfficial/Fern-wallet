@@ -50,6 +50,8 @@ data class StatementState(
     val invalidAmount: Boolean,
     /** The due date the form would save is earlier than the statement date. */
     val dueBeforeClosing: Boolean,
+    /** A save or clear is in progress; the form can't be changed until it is done. */
+    val saving: Boolean,
     val today: LocalDate,
 )
 
@@ -84,9 +86,9 @@ class CreditCardStatementViewModel @Inject constructor(
     private var dueBeforeClosing by mutableStateOf(false)
     private var dueRule: DueDateRule? = null
 
-    // Checking the dates suspends. Any change to the form (edit, dismiss, a newer save) bumps this
-    // so the result of a check that started earlier is dropped instead of applied to another form.
-    private var formVersion = 0
+    // Checking, writing and reloading suspend. Until they are done the form is frozen, so a result
+    // never lands on a form the user has since edited, dismissed or reopened.
+    private var saving by mutableStateOf(false)
 
     fun start(screen: CreditCardStatementScreen) {
         this.screen = screen
@@ -94,20 +96,21 @@ class CreditCardStatementViewModel @Inject constructor(
     }
 
     private fun reload() {
+        viewModelScope.launch { load() }
+    }
+
+    private suspend fun load() {
         val s = screen ?: return
-        viewModelScope.launch {
-            val item = overviewUseCase.load(AccountId(s.accountId))
-            val nominal = LocalDate.ofEpochDay(s.nominalClosingEpochDay)
-            val statements = item?.overview?.statements.orEmpty() // newest first
-            val found = statements.firstOrNull { it.nominalClosingDate == nominal }
-            cardName = item?.account?.name?.value.orEmpty()
-            currency = item?.account?.asset?.code.orEmpty()
-            dueRule = item?.card?.dueDateRule
-            statement = found
-            val ids = found?.entries?.mapNotNull { it.transactionId?.value }?.toSet().orEmpty()
-            rows = item?.let { rowsBuilder.rows(it) }.orEmpty().filter { it.id in ids }
-            loading = false
-        }
+        val item = overviewUseCase.load(AccountId(s.accountId))
+        val nominal = LocalDate.ofEpochDay(s.nominalClosingEpochDay)
+        val found = item?.overview?.statements?.firstOrNull { it.nominalClosingDate == nominal }
+        cardName = item?.account?.name?.value.orEmpty()
+        currency = item?.account?.asset?.code.orEmpty()
+        dueRule = item?.card?.dueDateRule
+        statement = found
+        val ids = found?.entries?.mapNotNull { it.transactionId?.value }?.toSet().orEmpty()
+        rows = item?.let { rowsBuilder.rows(it) }.orEmpty().filter { it.id in ids }
+        loading = false
     }
 
     @Composable
@@ -122,13 +125,14 @@ class CreditCardStatementViewModel @Inject constructor(
         issuerForm = issuerForm,
         invalidAmount = invalidAmount,
         dueBeforeClosing = dueBeforeClosing,
+        saving = saving,
         today = timeProvider.localDateNow(),
     )
 
     override fun onEvent(event: StatementEvent) {
+        if (saving && event !is StatementEvent.OpenTransaction) return
         when (event) {
             StatementEvent.EditIssuerValues -> statement?.let {
-                formVersion++
                 dueBeforeClosing = false
                 invalidAmount = false
                 issuerForm = IssuerForm(
@@ -139,13 +143,11 @@ class CreditCardStatementViewModel @Inject constructor(
                 )
             }
             StatementEvent.DismissIssuerValues -> {
-                formVersion++
                 issuerForm = null
                 invalidAmount = false
                 dueBeforeClosing = false
             }
             is StatementEvent.UpdateIssuerForm -> {
-                formVersion++
                 issuerForm = event.form
                 dueBeforeClosing = false
             }
@@ -168,39 +170,41 @@ class CreditCardStatementViewModel @Inject constructor(
         val nominal = LocalDate.ofEpochDay(s.nominalClosingEpochDay)
         invalidAmount = !clear && badAmount
         if (invalidAmount) return
-        val version = ++formVersion
+        saving = true
         viewModelScope.launch {
-            val accountId = AccountId(s.accountId)
-            if (clear) {
-                // Clearing never validates: it is how an invalid override saved earlier gets removed.
-                creditCardRepository.deleteStatementOverride(accountId, nominal)
+            try {
+                val accountId = AccountId(s.accountId)
+                if (clear) {
+                    // Clearing never validates: it is how an invalid override saved earlier gets removed.
+                    creditCardRepository.deleteStatementOverride(accountId, nominal)
+                } else {
+                    val override = StatementOverride(
+                        accountId = accountId,
+                        nominalClosingDate = nominal,
+                        actualClosingDate = form.actualClosingDate,
+                        actualDueDate = form.actualDueDate,
+                        issuerStatementBalance = balance,
+                        minimumDue = minimum,
+                    )
+                    dueBeforeClosing = StatementDateValidator.dueBeforeClosing(
+                        preview = overviewUseCase.previewStatement(accountId, override),
+                        nominalClosing = nominal,
+                        actualClosing = form.actualClosingDate,
+                        actualDue = form.actualDueDate,
+                        rule = dueRule,
+                    )
+                    if (dueBeforeClosing) return@launch
+                    creditCardRepository.saveStatementOverride(override)
+                }
+                // Overrides are keyed by the nominal closing date, so the same screen reloads the
+                // corrected period even when the actual closing date moved. Reloading before the
+                // form closes means a form opened next is filled from the saved values.
+                load()
                 dueBeforeClosing = false
-            } else {
-                val override = StatementOverride(
-                    accountId = accountId,
-                    nominalClosingDate = nominal,
-                    actualClosingDate = form.actualClosingDate,
-                    actualDueDate = form.actualDueDate,
-                    issuerStatementBalance = balance,
-                    minimumDue = minimum,
-                )
-                val invalidDates = StatementDateValidator.dueBeforeClosing(
-                    preview = overviewUseCase.previewStatement(accountId, override),
-                    nominalClosing = nominal,
-                    actualClosing = form.actualClosingDate,
-                    actualDue = form.actualDueDate,
-                    rule = dueRule,
-                )
-                if (version != formVersion) return@launch // the form changed while checking
-                dueBeforeClosing = invalidDates
-                if (invalidDates) return@launch
-                creditCardRepository.saveStatementOverride(override)
+                issuerForm = null
+            } finally {
+                saving = false
             }
-            // The write is done either way; only close the form if nobody touched it meanwhile.
-            if (version == formVersion) issuerForm = null
-            // Overrides are keyed by the nominal closing date, so the same screen reloads the
-            // corrected period even when the actual closing date moved.
-            reload()
         }
     }
 }
