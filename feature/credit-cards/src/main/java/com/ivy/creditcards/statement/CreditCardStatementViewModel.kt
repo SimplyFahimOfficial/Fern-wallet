@@ -84,6 +84,10 @@ class CreditCardStatementViewModel @Inject constructor(
     private var dueBeforeClosing by mutableStateOf(false)
     private var dueRule: DueDateRule? = null
 
+    // Checking the dates suspends. Any change to the form (edit, dismiss, a newer save) bumps this
+    // so the result of a check that started earlier is dropped instead of applied to another form.
+    private var formVersion = 0
+
     fun start(screen: CreditCardStatementScreen) {
         this.screen = screen
         reload()
@@ -124,6 +128,9 @@ class CreditCardStatementViewModel @Inject constructor(
     override fun onEvent(event: StatementEvent) {
         when (event) {
             StatementEvent.EditIssuerValues -> statement?.let {
+                formVersion++
+                dueBeforeClosing = false
+                invalidAmount = false
                 issuerForm = IssuerForm(
                     actualClosingDate = it.closingDate.takeIf { _ -> it.closingDateFromIssuer },
                     actualDueDate = it.dueDate.takeIf { _ -> it.dueDateFromIssuer },
@@ -132,11 +139,13 @@ class CreditCardStatementViewModel @Inject constructor(
                 )
             }
             StatementEvent.DismissIssuerValues -> {
+                formVersion++
                 issuerForm = null
                 invalidAmount = false
                 dueBeforeClosing = false
             }
             is StatementEvent.UpdateIssuerForm -> {
+                formVersion++
                 issuerForm = event.form
                 dueBeforeClosing = false
             }
@@ -159,6 +168,7 @@ class CreditCardStatementViewModel @Inject constructor(
         val nominal = LocalDate.ofEpochDay(s.nominalClosingEpochDay)
         invalidAmount = !clear && badAmount
         if (invalidAmount) return
+        val version = ++formVersion
         viewModelScope.launch {
             val accountId = AccountId(s.accountId)
             if (clear) {
@@ -174,14 +184,16 @@ class CreditCardStatementViewModel @Inject constructor(
                     issuerStatementBalance = balance,
                     minimumDue = minimum,
                 )
-                dueBeforeClosing = StatementDateValidator.dueBeforeClosing(
+                val invalidDates = StatementDateValidator.dueBeforeClosing(
                     preview = overviewUseCase.previewStatement(accountId, override),
                     nominalClosing = nominal,
                     actualClosing = form.actualClosingDate,
                     actualDue = form.actualDueDate,
                     rule = dueRule,
                 )
-                if (dueBeforeClosing) return@launch
+                if (version != formVersion) return@launch // the form changed while checking
+                dueBeforeClosing = invalidDates
+                if (invalidDates) return@launch
                 creditCardRepository.saveStatementOverride(override)
             }
             issuerForm = null

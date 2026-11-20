@@ -23,6 +23,7 @@ import io.kotest.matchers.shouldBe
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -74,6 +75,9 @@ class CreditCardStatementViewModelTest {
     private var ledger = listOf(entry("2026-01-10", "4550", CardLedgerEntry.Kind.CHARGE))
     private var overrides = emptyList<StatementOverride>()
 
+    /** When set, checking the dates waits for it, like a slow database read. */
+    private var gate: CompletableDeferred<Unit>? = null
+
     private val overviewUseCase = mockk<CreditCardOverviewUseCase>()
     private val repository = mockk<CreditCardRepository>()
     private lateinit var viewModel: CreditCardStatementViewModel
@@ -97,6 +101,7 @@ class CreditCardStatementViewModelTest {
             )
         }
         coEvery { overviewUseCase.previewStatement(any(), any()) } coAnswers {
+            gate?.await()
             val proposed = secondArg<StatementOverride>()
             val saved = overrides.filterNot { it.nominalClosingDate == proposed.nominalClosingDate }
             CreditCardCalculator.overview(card, ledger, saved + proposed, today).statements
@@ -203,6 +208,47 @@ class CreditCardStatementViewModelTest {
 
         viewModel.state().dueBeforeClosing shouldBe true
         coVerify(exactly = 0) { repository.saveStatementOverride(any()) }
+    }
+
+    @Test
+    fun `dismissing the form while the dates are checked drops the result`() {
+        gate = CompletableDeferred()
+        submit(form(closing = "2026-01-20", due = "2026-01-19"))
+
+        viewModel.onEvent(StatementEvent.DismissIssuerValues)
+        gate!!.complete(Unit)
+
+        viewModel.state().dueBeforeClosing shouldBe false
+        viewModel.state().issuerForm shouldBe null
+        coVerify(exactly = 0) { repository.saveStatementOverride(any()) }
+    }
+
+    @Test
+    fun `editing the form while the dates are checked drops the result, and the new values are saved`() {
+        gate = CompletableDeferred()
+        submit(form(closing = "2026-01-20", due = "2026-01-19"))
+
+        viewModel.onEvent(StatementEvent.UpdateIssuerForm(form(closing = "2026-01-20", due = "2026-02-01")))
+        gate!!.complete(Unit)
+
+        viewModel.state().dueBeforeClosing shouldBe false
+        viewModel.state().issuerForm?.actualDueDate shouldBe LocalDate.of(2026, 2, 1)
+        coVerify(exactly = 0) { repository.saveStatementOverride(any()) }
+
+        viewModel.onEvent(StatementEvent.SaveIssuerValues)
+        coVerify(exactly = 1) { repository.saveStatementOverride(any()) }
+        viewModel.state().issuerForm shouldBe null
+    }
+
+    @Test
+    fun `tapping Save twice saves once`() {
+        gate = CompletableDeferred()
+        submit(form(balance = "5000"))
+        viewModel.onEvent(StatementEvent.SaveIssuerValues)
+
+        gate!!.complete(Unit)
+
+        coVerify(exactly = 1) { repository.saveStatementOverride(any()) }
     }
 
     @Test
