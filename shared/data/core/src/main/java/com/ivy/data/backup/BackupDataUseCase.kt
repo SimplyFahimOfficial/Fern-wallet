@@ -29,17 +29,16 @@ import com.ivy.data.db.dao.write.WriteSettingsDao
 import com.ivy.data.db.dao.write.WriteTagAssociationDao
 import com.ivy.data.db.dao.write.WriteTagDao
 import com.ivy.data.db.dao.write.WriteTransactionDao
+import com.ivy.data.db.entity.AccountEntity
 import com.ivy.data.repository.mapper.AccountMapper
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import timber.log.Timber
 import java.io.FileOutputStream
-import java.util.UUID
 import javax.inject.Inject
 
 /**
@@ -180,7 +179,16 @@ class BackupDataUseCase @Inject constructor(
         }
         onProgress(PROGRESS_PARSED)
 
-        val completeData = mergeAccountsAndCategoriesByName(jsonString, parsed)
+        val completeData = withContext(dispatchersProvider.io) { mergeWithExistingRecords(parsed) }
+        val accounts = importableAccounts(completeData)
+        val missing = completeData.firstUnresolvedTransaction(
+            accountIds = accountDao.findAll().mapTo(mutableSetOf()) { it.id } + accounts.map { it.id }
+        )
+        if (missing != null) {
+            // Nothing has been written yet: no copy, no transaction.
+            Timber.e("Backup import refused: transaction $missing refers to an account that can't be restored")
+            return@withContext failedImport(ImportFailure.CORRUPTED)
+        }
 
         val snapshot = try {
             savePreRestoreCopyUnlessWalletIsEmpty()
@@ -194,7 +202,7 @@ class BackupDataUseCase @Inject constructor(
         onProgress(PROGRESS_SNAPSHOT)
 
         try {
-            transactionRunner.run { insertDataToDb(completeData, validateAccounts = true) }
+            transactionRunner.run { insertDataToDb(completeData, accounts) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -234,7 +242,7 @@ class BackupDataUseCase @Inject constructor(
             transactionRunner.run {
                 deleteAllWalletData()
                 // Exactly the previous rows: they came from this database, so no re-validation.
-                insertDataToDb(data, validateAccounts = false)
+                insertDataToDb(data, data.accounts)
             }
             applySharedPrefs(data)
             preRestoreSnapshots.delete(snapshot)
@@ -278,21 +286,27 @@ class BackupDataUseCase @Inject constructor(
         transactions, tags, tagAssociations, creditCards, creditCardStatements,
     ).any { it.isNotEmpty() }
 
-    // Accounts and categories in the backup that have the same name as an existing one are
-    // merged into it, so importing doesn't create duplicates. Their ids are replaced everywhere
-    // in the backup (transactions, budgets' serialized id lists, planned payments, loans, cards...).
-    private suspend fun mergeAccountsAndCategoriesByName(
-        jsonString: String,
-        parsed: IvyWalletCompleteData,
-    ): IvyWalletCompleteData {
-        val replacementPairs = getReplacementPairs(parsed)
-        if (replacementPairs.isEmpty()) return parsed
+    // Accounts and categories in the backup are the same records as the wallet's if they share
+    // an id, or, failing that, if they are each other's only match by name (see [matchAccounts]).
+    // Merged records take the wallet's id in every field that references them.
+    private suspend fun mergeWithExistingRecords(parsed: IvyWalletCompleteData): IvyWalletCompleteData {
+        val existingBaseCurrency = settingsDao.findFirstOrNull()?.currency
+        val maps = BackupIdMaps(
+            accounts = matchAccounts(
+                incoming = parsed.accounts,
+                incomingBaseCurrency = parsed.settings.firstOrNull()?.currency ?: existingBaseCurrency,
+                existing = accountDao.findAll(),
+                existingBaseCurrency = existingBaseCurrency,
+            ),
+            categories = matchCategories(parsed.categories, categoryDao.findAll()),
+        )
+        return parsed.remapIds(maps)
+    }
 
-        var modifiedString = jsonString
-        replacementPairs.forEach {
-            modifiedString = modifiedString.replace(it.first.toString(), it.second.toString())
-        }
-        return parse(modifiedString)
+    private suspend fun importableAccounts(completeData: IvyWalletCompleteData): List<AccountEntity> = with(
+        accountMapper
+    ) {
+        completeData.accounts.mapNotNull { entity -> entity.toDomain().getOrNull()?.toEntity() }
     }
 
     private suspend fun deleteAllWalletData() {
@@ -313,15 +327,8 @@ class BackupDataUseCase @Inject constructor(
     /** Must run inside [transactionRunner]: either every write is kept or none is. */
     private suspend fun insertDataToDb(
         completeData: IvyWalletCompleteData,
-        validateAccounts: Boolean,
+        accounts: List<AccountEntity>,
     ) {
-        val accounts = if (validateAccounts) {
-            with(accountMapper) {
-                completeData.accounts.mapNotNull { entity -> entity.toDomain().getOrNull()?.toEntity() }
-            }
-        } else {
-            completeData.accounts
-        }
         accountWriter.saveMany(accounts)
         categoryWriter.saveMany(completeData.categories)
         transactionWriter.saveMany(completeData.transactions)
@@ -377,58 +384,6 @@ class BackupDataUseCase @Inject constructor(
                     ?: "false"
                 ).toBoolean()
         )
-    }
-
-    /** This is used to replace account & category Ids in backup data with existing Ids
-     *  This removes the problem of duplicate Accounts & Categories
-     *
-     *  returns a Pair<A,B> of IDs where A is the UUID that needs to be replaced with B
-     */
-    private suspend fun getReplacementPairs(
-        completeData: IvyWalletCompleteData
-    ): List<Pair<UUID, UUID>> {
-        return withContext(dispatchersProvider.io) {
-            val existingAccountsList = accountDao.findAll()
-            val existingCategoryList = categoryDao.findAll()
-
-            val backupAccountsList = completeData.accounts
-            val backupCategoryList = completeData.categories
-
-            if (existingAccountsList.isEmpty() && existingCategoryList.isEmpty()) {
-                return@withContext emptyList()
-            }
-
-            val sumAccountList = existingAccountsList + backupAccountsList
-            val sumCategoriesList = existingCategoryList + backupCategoryList
-
-            val accountsReplace = async {
-                sumAccountList.groupBy { it.name }.filter { it.value.size == 2 }.map {
-                    val accountsZero = it.value[0]
-                    val accountsFirst = it.value[1]
-
-                    if (backupAccountsList.contains(accountsZero)) {
-                        Pair(accountsZero.id, accountsFirst.id)
-                    } else {
-                        Pair(accountsFirst.id, accountsZero.id)
-                    }
-                }
-            }
-
-            val categoriesReplace = async {
-                sumCategoriesList.groupBy { it.name }.filter { it.value.size == 2 }.map {
-                    val categoryZero = it.value[0]
-                    val categoryFirst = it.value[1]
-
-                    if (completeData.categories.contains(categoryZero)) {
-                        Pair(categoryZero.id, categoryFirst.id)
-                    } else {
-                        Pair(categoryFirst.id, categoryZero.id)
-                    }
-                }
-            }
-
-            (accountsReplace.await() + categoriesReplace.await()).filter { it.first != it.second }
-        }
     }
 
     private fun failedImport(failure: ImportFailure): ImportResult = ImportResult(

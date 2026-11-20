@@ -726,6 +726,12 @@
     <string name="cc_statement_balance">Statement balance</string>
     <string name="cc_issuer_statement_balance">Total due (from bank)</string>
     <string name="cc_minimum_due">Minimum due</string>
+    <string name="cc_compared_with_records">Compared with your records</string>
+    <string name="cc_matched">Matched</string>
+    <string name="cc_bank_higher">Bank statement is %1$s higher than your records.</string>
+    <string name="cc_bank_lower">Bank statement is %1$s lower than your records.</string>
+    <string name="cc_difference_note">For information only. Nothing is added to your records.</string>
+    <string name="cc_error_due_before_closing">The due date can\'t be earlier than the statement date</string>
     <string name="cc_issuer_values_title">Values from your bank</string>
     <string name="cc_issuer_values_hint">Use the exact figures printed on your statement. They replace Fern Wallet\'s calculation for this statement.</string>
     <string name="cc_actual_closing_date">Statement date</string>

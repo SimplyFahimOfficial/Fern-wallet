@@ -8,6 +8,7 @@ import com.ivy.data.model.AccountId
 import com.ivy.data.model.AccountType
 import com.ivy.data.model.Transaction
 import com.ivy.data.model.creditcard.CreditCard
+import com.ivy.data.model.creditcard.StatementOverride
 import com.ivy.data.repository.AccountRepository
 import com.ivy.data.repository.CreditCardRepository
 import com.ivy.data.repository.TransactionRepository
@@ -41,7 +42,25 @@ class CreditCardOverviewUseCase @Inject constructor(
             .mapNotNull { account -> cards[account.id]?.let { calculate(account, it) } }
     }
 
-    private suspend fun calculate(account: Account, card: CreditCard): CreditCardWithOverview {
+    /**
+     * The statement as it would be calculated if [proposed] were saved, with every other saved
+     * override unchanged, or null if it wouldn't be a closed statement then (or the card is gone).
+     * An issuer date can change which cycles exist, so the only reliable check is to calculate.
+     */
+    suspend fun previewStatement(accountId: AccountId, proposed: StatementOverride): CardStatement? {
+        val account = accountRepository.findById(accountId)?.takeIf { it.type == AccountType.CREDIT_CARD }
+        val card = account?.let { creditCardRepository.findByAccountId(accountId) } ?: return null
+        val preview = calculate(account, card) { saved ->
+            saved.filterNot { it.nominalClosingDate == proposed.nominalClosingDate } + proposed
+        }
+        return preview.overview.statements.firstOrNull { it.nominalClosingDate == proposed.nominalClosingDate }
+    }
+
+    private suspend fun calculate(
+        account: Account,
+        card: CreditCard,
+        withOverrides: (List<StatementOverride>) -> List<StatementOverride> = { it },
+    ): CreditCardWithOverview {
         // Same window as the account balance (CalcAccBalanceAct): settled transactions up to now.
         val now = timeProvider.utcNow()
         val transactions = (
@@ -52,7 +71,7 @@ class CreditCardOverviewUseCase @Inject constructor(
         val ledger = CardLedger.entries(account.id, transactions) { instant ->
             with(timeConverter) { instant.toLocalDate() }
         }
-        val overrides = creditCardRepository.findStatementOverrides(account.id)
+        val overrides = withOverrides(creditCardRepository.findStatementOverrides(account.id))
         val overview = CreditCardCalculator.overview(
             card = card,
             ledger = ledger,
