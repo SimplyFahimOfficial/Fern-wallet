@@ -83,6 +83,7 @@ class CreditCardStatementViewModel @Inject constructor(
     private var invalidAmount by mutableStateOf(false)
     private var dueBeforeClosing by mutableStateOf(false)
     private var dueRule: DueDateRule? = null
+    private var previousClosing: LocalDate? = null
 
     fun start(screen: CreditCardStatementScreen) {
         this.screen = screen
@@ -94,7 +95,10 @@ class CreditCardStatementViewModel @Inject constructor(
         viewModelScope.launch {
             val item = overviewUseCase.load(AccountId(s.accountId))
             val nominal = LocalDate.ofEpochDay(s.nominalClosingEpochDay)
-            val found = item?.overview?.statements?.firstOrNull { it.nominalClosingDate == nominal }
+            val statements = item?.overview?.statements.orEmpty() // newest first
+            val index = statements.indexOfFirst { it.nominalClosingDate == nominal }
+            val found = statements.getOrNull(index)
+            previousClosing = found?.let { statements.getOrNull(index + 1) }?.closingDate
             cardName = item?.account?.name?.value.orEmpty()
             currency = item?.account?.asset?.code.orEmpty()
             dueRule = item?.card?.dueDateRule
@@ -162,6 +166,7 @@ class CreditCardStatementViewModel @Inject constructor(
             actualClosing = form.actualClosingDate,
             actualDue = form.actualDueDate,
             rule = dueRule,
+            previousClosing = previousClosing,
         )
         invalidAmount = !clear && badAmount
         dueBeforeClosing = badDates

@@ -9,13 +9,18 @@ class StatementDateValidatorTest {
     private val nominal = LocalDate.of(2026, 1, 15)
     private val rule = DueDateRule.DaysAfterStatement(20)
 
-    private fun dueBeforeClosing(closing: String?, due: String?, rule: DueDateRule? = this.rule): Boolean =
-        StatementDateValidator.dueBeforeClosing(
-            nominalClosing = nominal,
-            actualClosing = closing?.let(LocalDate::parse),
-            actualDue = due?.let(LocalDate::parse),
-            rule = rule,
-        )
+    private fun dueBeforeClosing(
+        closing: String?,
+        due: String?,
+        rule: DueDateRule? = this.rule,
+        previous: String? = null,
+    ): Boolean = StatementDateValidator.dueBeforeClosing(
+        nominalClosing = nominal,
+        actualClosing = closing?.let(LocalDate::parse),
+        actualDue = due?.let(LocalDate::parse),
+        rule = rule,
+        previousClosing = previous?.let(LocalDate::parse),
+    )
 
     @Test
     fun `a due date before the closing date is rejected`() {
@@ -41,6 +46,16 @@ class StatementDateValidatorTest {
     @Test
     fun `a closing date alone is fine without a due rule`() {
         dueBeforeClosing(closing = "2026-03-01", due = null, rule = null) shouldBe false
+    }
+
+    @Test
+    fun `a closing date that does not come after the previous statement is replaced by the calculated one`() {
+        // Ignored by the calculator, so the due date is compared with the calculated 15 Jan.
+        dueBeforeClosing(closing = "2025-12-10", due = "2026-01-05", previous = "2025-12-15") shouldBe true
+        dueBeforeClosing(closing = "2025-12-10", due = "2026-01-20", previous = "2025-12-15") shouldBe false
+        // Accepted by the calculator, so the entered date is the closing date.
+        dueBeforeClosing(closing = "2025-12-20", due = "2025-12-25", previous = "2025-12-15") shouldBe false
+        dueBeforeClosing(closing = "2025-12-20", due = "2025-12-19", previous = "2025-12-15") shouldBe true
     }
 
     @Test

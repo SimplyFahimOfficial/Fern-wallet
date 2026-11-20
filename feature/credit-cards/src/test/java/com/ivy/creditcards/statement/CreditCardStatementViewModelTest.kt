@@ -38,9 +38,9 @@ import java.util.UUID
 @OptIn(ExperimentalCoroutinesApi::class)
 class CreditCardStatementViewModelTest {
     private val cardId = AccountId(UUID(0, 1))
-    private val today = LocalDate.of(2026, 1, 25)
+    private var today = LocalDate.of(2026, 1, 25)
     private val nominal = LocalDate.of(2026, 1, 15)
-    private val screen = CreditCardStatementScreen(cardId.value, nominal.toEpochDay())
+    private var screen = CreditCardStatementScreen(cardId.value, nominal.toEpochDay())
 
     private val card = CreditCard(
         accountId = cardId,
@@ -98,15 +98,17 @@ class CreditCardStatementViewModelTest {
         }
         coEvery { repository.saveStatementOverride(any()) } coAnswers { overrides = listOf(firstArg()) }
         coEvery { repository.deleteStatementOverride(any(), any()) } coAnswers { overrides = emptyList() }
-        viewModel = CreditCardStatementViewModel(
-            overviewUseCase = overviewUseCase,
-            creditCardRepository = repository,
-            rowsBuilder = mockk<CardRowsBuilder>(relaxed = true),
-            timeProvider = mockk<TimeProvider> { io.mockk.every { localDateNow() } returns today },
-            navigation = mockk(relaxed = true),
-        )
+        viewModel = createViewModel()
         viewModel.start(screen)
     }
+
+    private fun createViewModel() = CreditCardStatementViewModel(
+        overviewUseCase = overviewUseCase,
+        creditCardRepository = repository,
+        rowsBuilder = mockk<CardRowsBuilder>(relaxed = true),
+        timeProvider = mockk<TimeProvider> { io.mockk.every { localDateNow() } answers { today } },
+        navigation = mockk(relaxed = true),
+    )
 
     @After
     fun tearDown() {
@@ -166,6 +168,25 @@ class CreditCardStatementViewModelTest {
         viewModel.state().dueBeforeClosing shouldBe false
         coVerify(exactly = 1) { repository.saveStatementOverride(any()) }
         viewModel.state().statement!!.dueDate shouldBe LocalDate.of(2026, 2, 6)
+    }
+
+    @Test
+    fun `a closing date the calculator would ignore is validated as the calculated one`() {
+        // February's statement: January 10 doesn't come after January's closing (15th), so the
+        // calculator keeps February 15 and a January 20 due date would precede the closing date.
+        today = LocalDate.of(2026, 2, 25)
+        ledger = listOf(
+            entry("2026-01-10", "100", CardLedgerEntry.Kind.CHARGE),
+            entry("2026-02-10", "50", CardLedgerEntry.Kind.CHARGE),
+        )
+        screen = CreditCardStatementScreen(cardId.value, LocalDate.of(2026, 2, 15).toEpochDay())
+        viewModel = createViewModel()
+        viewModel.start(screen)
+
+        submit(form(closing = "2026-01-10", due = "2026-01-20"))
+
+        viewModel.state().dueBeforeClosing shouldBe true
+        coVerify(exactly = 0) { repository.saveStatementOverride(any()) }
     }
 
     @Test

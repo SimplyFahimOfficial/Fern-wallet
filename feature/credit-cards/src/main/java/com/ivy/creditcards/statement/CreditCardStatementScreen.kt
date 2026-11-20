@@ -169,18 +169,20 @@ private fun IssuerComparison(difference: BigDecimal, currency: String) {
             label = stringResource(R.string.cc_compared_with_records),
             value = stringResource(R.string.cc_matched),
         )
-        return
+    } else {
+        Column {
+            val amount = difference.abs().money(currency)
+            Text(
+                text = if (difference.signum() > 0) {
+                    stringResource(R.string.cc_bank_higher, amount)
+                } else {
+                    stringResource(R.string.cc_bank_lower, amount)
+                },
+                style = UI.typo.b2.style(color = UI.colors.orange, fontWeight = FontWeight.Bold),
+            )
+            Text(stringResource(R.string.cc_difference_note), style = UI.typo.nC.style(color = UI.colors.gray))
+        }
     }
-    val amount = difference.abs().money(currency)
-    Text(
-        text = if (difference.signum() > 0) {
-            stringResource(R.string.cc_bank_higher, amount)
-        } else {
-            stringResource(R.string.cc_bank_lower, amount)
-        },
-        style = UI.typo.b2.style(color = UI.colors.orange, fontWeight = FontWeight.Bold),
-    )
-    Text(stringResource(R.string.cc_difference_note), style = UI.typo.nC.style(color = UI.colors.gray))
 }
 
 @Composable
