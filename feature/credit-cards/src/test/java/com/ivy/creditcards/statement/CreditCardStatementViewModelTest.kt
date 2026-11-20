@@ -78,6 +78,9 @@ class CreditCardStatementViewModelTest {
     /** When set, checking the dates waits for it, like a slow database read. */
     private var gate: CompletableDeferred<Unit>? = null
 
+    /** When set, writing to the repository waits for it. */
+    private var writeGate: CompletableDeferred<Unit>? = null
+
     private val overviewUseCase = mockk<CreditCardOverviewUseCase>()
     private val repository = mockk<CreditCardRepository>()
     private lateinit var viewModel: CreditCardStatementViewModel
@@ -107,8 +110,14 @@ class CreditCardStatementViewModelTest {
             CreditCardCalculator.overview(card, ledger, saved + proposed, today).statements
                 .firstOrNull { it.nominalClosingDate == proposed.nominalClosingDate }
         }
-        coEvery { repository.saveStatementOverride(any()) } coAnswers { overrides = listOf(firstArg()) }
-        coEvery { repository.deleteStatementOverride(any(), any()) } coAnswers { overrides = emptyList() }
+        coEvery { repository.saveStatementOverride(any()) } coAnswers {
+            writeGate?.await()
+            overrides = listOf(firstArg())
+        }
+        coEvery { repository.deleteStatementOverride(any(), any()) } coAnswers {
+            writeGate?.await()
+            overrides = emptyList()
+        }
         viewModel = createViewModel()
         viewModel.start(screen)
     }
@@ -238,6 +247,34 @@ class CreditCardStatementViewModelTest {
         viewModel.onEvent(StatementEvent.SaveIssuerValues)
         coVerify(exactly = 1) { repository.saveStatementOverride(any()) }
         viewModel.state().issuerForm shouldBe null
+    }
+
+    @Test
+    fun `edits made while the write is pending are kept, and the statement still reloads`() {
+        writeGate = CompletableDeferred()
+        submit(form(balance = "100"))
+
+        viewModel.onEvent(StatementEvent.UpdateIssuerForm(form(balance = "200")))
+        writeGate!!.complete(Unit)
+
+        viewModel.state().issuerForm?.issuerBalance shouldBe "200"
+        coVerify(exactly = 1) { repository.saveStatementOverride(match { it.issuerStatementBalance?.toInt() == 100 }) }
+        difference()!! shouldBeEqualComparingTo BigDecimal("-4450")
+    }
+
+    @Test
+    fun `reopening the form while a clear is pending keeps it open`() {
+        submit(form(balance = "5000"))
+        writeGate = CompletableDeferred()
+        viewModel.onEvent(StatementEvent.EditIssuerValues)
+        viewModel.onEvent(StatementEvent.ClearIssuerValues)
+
+        viewModel.onEvent(StatementEvent.EditIssuerValues)
+        writeGate!!.complete(Unit)
+
+        // Reopened from what was saved at the time; the write finishing doesn't close it.
+        viewModel.state().issuerForm shouldBe form(balance = "5000")
+        viewModel.state().statement!!.issuerStatementBalance shouldBe null
     }
 
     @Test

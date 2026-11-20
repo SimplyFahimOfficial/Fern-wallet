@@ -196,7 +196,8 @@ class CreditCardStatementViewModel @Inject constructor(
                 if (invalidDates) return@launch
                 creditCardRepository.saveStatementOverride(override)
             }
-            issuerForm = null
+            // The write is done either way; only close the form if nobody touched it meanwhile.
+            if (version == formVersion) issuerForm = null
             // Overrides are keyed by the nominal closing date, so the same screen reloads the
             // corrected period even when the actual closing date moved.
             reload()
