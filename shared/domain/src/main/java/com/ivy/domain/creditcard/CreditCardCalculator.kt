@@ -178,7 +178,9 @@ object CreditCardCalculator {
         while (!reachedOpenCycle && cycles.size < MAX_CYCLES) {
             val nominal = nominalClosingDate(month, statementDay)
             val override = byNominal[nominal]
-            val closing = effectiveClosingDate(nominal, override?.actualClosingDate, previousClosing)
+            val issuerClosing = override?.actualClosingDate ?: nominal
+            // Ignore an issuer date that would put cycles out of order.
+            val closing = if (isAfterPrevious(issuerClosing, previousClosing)) issuerClosing else nominal
             if (isAfterPrevious(closing, previousClosing)) {
                 cycles += Cycle(nominal, periodStart, closing, override)
                 reachedOpenCycle = !closing.isBefore(today)
@@ -189,13 +191,6 @@ object CreditCardCalculator {
         }
         return cycles
     }
-
-    /**
-     * The closing date a cycle really uses: the issuer's date, unless it wouldn't come after the
-     * previous closing (that would put cycles out of order), then the calculated one.
-     */
-    fun effectiveClosingDate(nominal: LocalDate, issuerClosing: LocalDate?, previousClosing: LocalDate?): LocalDate =
-        if (issuerClosing != null && isAfterPrevious(issuerClosing, previousClosing)) issuerClosing else nominal
 
     private fun isAfterPrevious(closing: LocalDate, previous: LocalDate?): Boolean =
         previous == null || closing.isAfter(previous)

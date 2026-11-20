@@ -96,6 +96,12 @@ class CreditCardStatementViewModelTest {
                 transactions = emptyList(),
             )
         }
+        coEvery { overviewUseCase.previewStatement(any(), any()) } coAnswers {
+            val proposed = secondArg<StatementOverride>()
+            val saved = overrides.filterNot { it.nominalClosingDate == proposed.nominalClosingDate }
+            CreditCardCalculator.overview(card, ledger, saved + proposed, today).statements
+                .firstOrNull { it.nominalClosingDate == proposed.nominalClosingDate }
+        }
         coEvery { repository.saveStatementOverride(any()) } coAnswers { overrides = listOf(firstArg()) }
         coEvery { repository.deleteStatementOverride(any(), any()) } coAnswers { overrides = emptyList() }
         viewModel = createViewModel()
@@ -184,6 +190,16 @@ class CreditCardStatementViewModelTest {
         viewModel.start(screen)
 
         submit(form(closing = "2026-01-10", due = "2026-01-20"))
+
+        viewModel.state().dueBeforeClosing shouldBe true
+        coVerify(exactly = 0) { repository.saveStatementOverride(any()) }
+    }
+
+    @Test
+    fun `an earlier closing date that adds a cycle before the first statement is validated as ignored`() {
+        // Opened 1 Jan: entering 10 Dec as January's closing date makes the calculator add a
+        // December cycle and drop that date, so a 12 Dec due date is earlier than 15 Jan.
+        submit(form(closing = "2025-12-10", due = "2025-12-12"))
 
         viewModel.state().dueBeforeClosing shouldBe true
         coVerify(exactly = 0) { repository.saveStatementOverride(any()) }

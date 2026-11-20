@@ -83,7 +83,6 @@ class CreditCardStatementViewModel @Inject constructor(
     private var invalidAmount by mutableStateOf(false)
     private var dueBeforeClosing by mutableStateOf(false)
     private var dueRule: DueDateRule? = null
-    private var previousClosing: LocalDate? = null
 
     fun start(screen: CreditCardStatementScreen) {
         this.screen = screen
@@ -96,9 +95,7 @@ class CreditCardStatementViewModel @Inject constructor(
             val item = overviewUseCase.load(AccountId(s.accountId))
             val nominal = LocalDate.ofEpochDay(s.nominalClosingEpochDay)
             val statements = item?.overview?.statements.orEmpty() // newest first
-            val index = statements.indexOfFirst { it.nominalClosingDate == nominal }
-            val found = statements.getOrNull(index)
-            previousClosing = found?.let { statements.getOrNull(index + 1) }?.closingDate
+            val found = statements.firstOrNull { it.nominalClosingDate == nominal }
             cardName = item?.account?.name?.value.orEmpty()
             currency = item?.account?.asset?.code.orEmpty()
             dueRule = item?.card?.dueDateRule
@@ -160,32 +157,32 @@ class CreditCardStatementViewModel @Inject constructor(
         val badAmount = (form.issuerBalance.isNotBlank() && balance == null) ||
             (form.minimumDue.isNotBlank() && (minimum == null || minimum.signum() < 0))
         val nominal = LocalDate.ofEpochDay(s.nominalClosingEpochDay)
-        // Clearing never validates: it is how an invalid override saved earlier gets removed.
-        val badDates = !clear && StatementDateValidator.dueBeforeClosing(
-            nominalClosing = nominal,
-            actualClosing = form.actualClosingDate,
-            actualDue = form.actualDueDate,
-            rule = dueRule,
-            previousClosing = previousClosing,
-        )
         invalidAmount = !clear && badAmount
-        dueBeforeClosing = badDates
-        if (invalidAmount || badDates) return
+        if (invalidAmount) return
         viewModelScope.launch {
             val accountId = AccountId(s.accountId)
             if (clear) {
+                // Clearing never validates: it is how an invalid override saved earlier gets removed.
                 creditCardRepository.deleteStatementOverride(accountId, nominal)
+                dueBeforeClosing = false
             } else {
-                creditCardRepository.saveStatementOverride(
-                    StatementOverride(
-                        accountId = accountId,
-                        nominalClosingDate = nominal,
-                        actualClosingDate = form.actualClosingDate,
-                        actualDueDate = form.actualDueDate,
-                        issuerStatementBalance = balance,
-                        minimumDue = minimum,
-                    )
+                val override = StatementOverride(
+                    accountId = accountId,
+                    nominalClosingDate = nominal,
+                    actualClosingDate = form.actualClosingDate,
+                    actualDueDate = form.actualDueDate,
+                    issuerStatementBalance = balance,
+                    minimumDue = minimum,
                 )
+                dueBeforeClosing = StatementDateValidator.dueBeforeClosing(
+                    preview = overviewUseCase.previewStatement(accountId, override),
+                    nominalClosing = nominal,
+                    actualClosing = form.actualClosingDate,
+                    actualDue = form.actualDueDate,
+                    rule = dueRule,
+                )
+                if (dueBeforeClosing) return@launch
+                creditCardRepository.saveStatementOverride(override)
             }
             issuerForm = null
             // Overrides are keyed by the nominal closing date, so the same screen reloads the

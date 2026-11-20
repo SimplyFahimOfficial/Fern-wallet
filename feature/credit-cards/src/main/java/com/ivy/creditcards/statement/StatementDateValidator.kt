@@ -1,6 +1,7 @@
 package com.ivy.creditcards.statement
 
 import com.ivy.data.model.creditcard.DueDateRule
+import com.ivy.domain.creditcard.CardStatement
 import com.ivy.domain.creditcard.CreditCardCalculator
 import java.time.LocalDate
 
@@ -8,21 +9,23 @@ import java.time.LocalDate
 object StatementDateValidator {
 
     /**
-     * True if the due date would fall before the closing date. A date the user left empty is
-     * derived the way the statement itself derives it: the closing date from the card's statement
-     * day ([nominalClosing]), the due date from the card's due-date [rule]. An entered closing date
-     * that doesn't come after the [previousClosing] one is ignored by the calculator, so it is
-     * ignored here too. No rule and no due date means there is nothing to compare.
+     * True if the due date would fall before the closing date.
+     *
+     * [preview] is the statement as the calculator would build it with the override saved; its
+     * dates are the effective ones (the calculator ignores an issuer closing date that doesn't fit
+     * between the neighbouring cycles). Without a preview, a date the user left empty is derived
+     * the usual way: the closing date from the statement day ([nominalClosing]), the due date from
+     * the card's due-date [rule]. No rule and no due date means there is nothing to compare.
      */
     fun dueBeforeClosing(
+        preview: CardStatement?,
         nominalClosing: LocalDate,
         actualClosing: LocalDate?,
         actualDue: LocalDate?,
         rule: DueDateRule?,
-        previousClosing: LocalDate?,
     ): Boolean {
-        val closing = CreditCardCalculator.effectiveClosingDate(nominalClosing, actualClosing, previousClosing)
-        val due = actualDue ?: CreditCardCalculator.dueDate(closing, rule)
+        val closing = preview?.closingDate ?: actualClosing ?: nominalClosing
+        val due = preview?.dueDate ?: actualDue ?: CreditCardCalculator.dueDate(closing, rule)
         return due != null && due.isBefore(closing)
     }
 }
