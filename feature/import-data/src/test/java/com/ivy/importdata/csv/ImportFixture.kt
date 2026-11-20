@@ -101,6 +101,14 @@ class FlakyTransactionDao(private val dao: FakeTransactionDao) :
     TransactionDao by dao, WriteTransactionDao by dao {
     var failNextSave = false
 
+    /** Every range the importer asked for. */
+    val ranges = mutableListOf<Pair<Instant, Instant>>()
+
+    override suspend fun findAllBetween(startDate: Instant, endDate: Instant): List<TransactionEntity> {
+        ranges += startDate to endDate
+        return dao.findAllBetween(startDate, endDate)
+    }
+
     override suspend fun saveMany(values: List<TransactionEntity>) {
         if (failNextSave) {
             dao.saveMany(values.take(values.size / 2))
@@ -186,6 +194,12 @@ class ImportFixture(baseCurrency: String = "USD") {
         transactionRunner = runner,
         dataObserver = dataObserver,
     )
+
+    val queriedRanges: List<Pair<Instant, Instant>> get() = flaky.ranges
+
+    fun clearQueriedRanges() {
+        flaky.ranges.clear()
+    }
 
     fun failNextTransactionSave(fail: Boolean = true) {
         flaky.failNextSave = fail

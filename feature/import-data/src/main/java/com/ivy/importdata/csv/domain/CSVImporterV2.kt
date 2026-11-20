@@ -42,6 +42,7 @@ import com.ivy.wallet.ui.theme.IvyDark
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 import javax.inject.Inject
@@ -393,19 +394,23 @@ class CSVImporterV2 @Inject constructor(
      */
     private suspend fun flagDuplicates(rows: List<PlannedRow>): List<PlannedRow> {
         if (rows.isEmpty()) return rows
-        val times = rows.mapNotNull { it.transaction.dateTime }
-        val inWallet = transactionDao.findAllBetween(times.min(), times.max())
-            .mapTo(mutableSetOf()) {
+        val inWallet = mutableSetOf<DuplicateKey>()
+        // Only an identical date and time can match, so look at the wallet around the CSV's dates
+        // instead of everything between its first and last row.
+        rows.mapNotNull { it.transaction.dateTime }.sorted().windows().forEach { (from, to) ->
+            transactionDao.findAllBetween(from, to).mapTo(inWallet) {
                 DuplicateKey(
                     type = it.type,
                     account = AccountId(it.accountId),
                     toAccount = it.toAccountId?.let(::AccountId),
                     amount = it.amount.cents(),
-                    toAmount = if (it.toAccountId != null) it.toAmount?.cents() else null,
+                    // A transfer without a destination amount credits the source amount.
+                    toAmount = if (it.toAccountId != null) (it.toAmount ?: it.amount).cents() else null,
                     dateTime = it.dateTime,
                     title = it.title.normalized(),
                 )
             }
+        }
         val firstLineInFile = mutableMapOf<DuplicateKey, Int>()
         return rows.map { row ->
             val t = row.transaction
@@ -427,6 +432,20 @@ class CSVImporterV2 @Inject constructor(
         }
     }
 
+    /** Sorted instants as ranges; a gap longer than [DUPLICATE_WINDOW_GAP] starts a new range. */
+    private fun List<Instant>.windows(): List<Pair<Instant, Instant>> {
+        val windows = mutableListOf<Pair<Instant, Instant>>()
+        for (instant in this) {
+            val last = windows.lastOrNull()
+            if (last != null && Duration.between(last.second, instant) <= DUPLICATE_WINDOW_GAP) {
+                windows[windows.lastIndex] = last.first to instant
+            } else {
+                windows += instant to instant
+            }
+        }
+        return windows
+    }
+
     private data class DuplicateKey(
         val type: TransactionType,
         val account: AccountId,
@@ -444,5 +463,6 @@ class CSVImporterV2 @Inject constructor(
     private companion object {
         const val SAVE_CHUNK = 500
         const val CENTS_PER_UNIT = 100
+        val DUPLICATE_WINDOW_GAP: Duration = Duration.ofDays(31)
     }
 }

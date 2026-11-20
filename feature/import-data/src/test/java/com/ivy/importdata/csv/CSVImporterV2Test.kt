@@ -1,6 +1,7 @@
 package com.ivy.importdata.csv
 
 import com.ivy.base.model.TransactionType
+import com.ivy.data.db.entity.TransactionEntity
 import com.ivy.importdata.csv.domain.Duplicate
 import com.ivy.legacy.domain.pure.transaction.AccountValueFunctions
 import io.kotest.assertions.throwables.shouldThrow
@@ -12,6 +13,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Test
 import java.io.IOException
 import java.math.BigDecimal
+import java.time.Instant
 import java.util.UUID
 
 class CSVImporterV2Test {
@@ -204,6 +206,42 @@ class CSVImporterV2Test {
         val plan = fixture.prepare(coffee)
 
         plan.rows.single().duplicate shouldBe Duplicate(inFileLine = null)
+    }
+
+    @Test
+    fun `a stored transfer without a destination amount matches the same transfer in the file`() = runTest {
+        val wallet = fixture.givenAccount("Wallet", "USD")
+        val savings = fixture.givenAccount("Savings", "USD")
+        fixture.transactionDao.save(
+            TransactionEntity(
+                accountId = wallet,
+                type = TransactionType.TRANSFER,
+                amount = 100.0,
+                toAccountId = savings,
+                toAmount = null,
+                dateTime = Instant.parse("2026-01-05T10:00:00Z"),
+            )
+        )
+
+        val plan = fixture.prepare(
+            row(type = "Transfer", account = "Wallet", amount = "100", toAccount = "Savings", toAmount = "100")
+        )
+
+        plan.rows.single().duplicate shouldBe Duplicate(inFileLine = null)
+    }
+
+    @Test
+    fun `only the wallet around the file's dates is looked at, and matches in every range are found`() = runTest {
+        fixture.givenAccount("Wallet", "USD")
+        val old = row(date = "05/01/2020 10:00", type = "Expense", account = "Wallet", amount = "3", title = "Old")
+        val recent = row(date = "05/01/2026 10:00", type = "Expense", account = "Wallet", amount = "4", title = "New")
+        fixture.importer.commit(fixture.prepare(old, recent), emptySet()) {}
+        fixture.clearQueriedRanges()
+
+        val plan = fixture.prepare(old, recent)
+
+        fixture.queriedRanges shouldHaveSize 2
+        plan.rows.map { it.duplicate } shouldBe listOf(Duplicate(inFileLine = null), Duplicate(inFileLine = null))
     }
     // endregion
 

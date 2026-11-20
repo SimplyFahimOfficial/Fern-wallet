@@ -26,6 +26,10 @@ import com.ivy.importdata.csv.domain.PlannedRow
 import com.ivy.importdata.csv.domain.select
 import java.math.BigDecimal
 import java.text.DecimalFormat
+import java.time.LocalDateTime
+import java.time.LocalTime
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
 
 /** The prepared import. Nothing is written until Confirm; Back and Cancel leave the wallet as it is. */
 @Composable
@@ -144,7 +148,7 @@ private fun PlannedRowItem(
         Checkbox(checked = selected, onCheckedChange = { onToggle() })
         Column {
             Text(
-                text = "Line ${row.line} · ${row.date} · ${row.transaction.type.label()}",
+                text = "Line ${row.line} · ${row.date.display()} · ${row.transaction.type.label()}",
                 style = UI.typo.nB2,
                 fontWeight = FontWeight.Bold,
             )
@@ -183,5 +187,12 @@ private fun PlannedRow.describe(): String {
         "$accountName: $amount"
     }
 }
+
+private val DateAndTime = DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM, FormatStyle.SHORT)
+private val DateOnly = DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)
+
+/** Date files often have no time of day; don't show a made-up midnight. */
+private fun LocalDateTime.display(): String =
+    if (toLocalTime() == LocalTime.MIDNIGHT) DateOnly.format(this) else DateAndTime.format(this)
 
 private fun BigDecimal.format(): String = DecimalFormat("#,##0.##").format(this)
