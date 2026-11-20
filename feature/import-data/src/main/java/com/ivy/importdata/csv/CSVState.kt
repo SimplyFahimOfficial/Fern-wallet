@@ -1,6 +1,8 @@
 package com.ivy.importdata.csv
 
+import androidx.compose.runtime.Immutable
 import com.ivy.data.backup.ImportResult
+import com.ivy.importdata.csv.domain.ImportPlan
 import kotlinx.collections.immutable.ImmutableList
 
 data class CSVState(
@@ -16,6 +18,16 @@ data class CSVState(
 sealed interface UIState {
     object Idle : UIState
     data class Processing(val percent: Int) : UIState
+
+    /** The prepared import, waiting for the user. Nothing has been written yet. */
+    @Immutable
+    data class Review(
+        val plan: ImportPlan,
+        val excludedLines: Set<Int>,
+        /** Why the last confirm didn't go through; the wallet is unchanged and Confirm can be retried. */
+        val error: String?,
+    ) : UIState
+
     data class Result(val importResult: ImportResult) : UIState
 }
 
@@ -74,6 +86,9 @@ data class MappingStatus(
     val success: Boolean,
 )
 
+@Suppress("DataClassDefaultValues") // only rows read from a file have a line; sample rows don't
 data class CSVRow(
-    val values: List<String>
+    val values: List<String>,
+    /** 1-based line of the file where this row starts, 0 if unknown. */
+    val line: Int = 0,
 )

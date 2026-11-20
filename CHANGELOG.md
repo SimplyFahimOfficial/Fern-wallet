@@ -176,6 +176,20 @@ See `PLAN.md` for the decisions behind each item.
   generic Fern illustration; no bank or network logos are bundled.
 - Database 130 → 131 is an additive migration; backups include card data, and older backups still import.
 
+### CSV import
+- **Review before importing:** the manual CSV import now shows what it found before saving anything.
+  You see how many rows are accepted and rejected (with the CSV line and the reason), which accounts
+  and categories would be created, and both amounts and currencies for transfers. Untick rows to
+  leave them out, go back to change the column mapping (the preview is rebuilt), or cancel without
+  touching your wallet. Rows that look like an existing transaction, or like another row of the file,
+  are flagged but still your call.
+- **Transfers:** the debit now comes from the Amount column and the credit from To Amount. A blank To
+  Amount reuses the amount only when both accounts have the same currency; otherwise the row is rejected.
+  Transfers to the same account, or with an invalid To Amount, are rejected too.
+- **All or nothing:** the selected rows and the accounts and categories they need are saved in one
+  database transaction. If saving fails, nothing is kept and you can try again. The result screen
+  reports what was actually saved.
+
 ### Fixes
 - Amount shortening: `999,999` showed `1000.00k` (now `1m`), small amounts showed `500.0`/scientific notation,
   the decimal separator ignored the locale.

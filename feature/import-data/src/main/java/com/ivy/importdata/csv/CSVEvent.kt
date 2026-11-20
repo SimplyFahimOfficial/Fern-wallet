@@ -34,6 +34,14 @@ sealed interface CSVEvent {
     data object Continue : CSVEvent
     data object ResetState : CSVEvent
 
+    /** Include or exclude a row of the review. */
+    data class ToggleRow(val line: Int) : CSVEvent
+    data object ConfirmImport : CSVEvent
+
+    /** Back from the review to the column mapping; the review is rebuilt on the next Continue. */
+    data object BackToMapping : CSVEvent
+    data object CancelImport : CSVEvent
+
     data class FinishImport(
         val launchedFromOnboarding: Boolean,
         val onboardingViewModel: OnboardingViewModel

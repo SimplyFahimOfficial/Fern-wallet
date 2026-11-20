@@ -22,6 +22,7 @@ import com.ivy.importdata.csv.domain.parseTitle
 import com.ivy.importdata.csv.domain.parseToAccount
 import com.ivy.importdata.csv.domain.parseToAccountCurrency
 import com.ivy.importdata.csv.domain.parseTransactionType
+import com.ivy.importdata.csv.domain.select
 import com.ivy.navigation.Navigation
 import com.ivy.data.file.FileSystem
 import com.opencsv.CSVReaderBuilder
@@ -30,10 +31,12 @@ import com.opencsv.validators.RowValidator
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.toImmutableList
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import timber.log.Timber
 import java.io.StringReader
 import java.nio.charset.Charset
 import javax.inject.Inject
@@ -201,7 +204,8 @@ class CSVViewModel @Inject constructor(
     )
     // endregion
 
-    private var uiState by mutableStateOf<UIState>(UIState.Idle)
+    internal var uiState by mutableStateOf<UIState>(UIState.Idle)
+        private set
 
     @Composable
     fun uiState(): CSVState {
@@ -432,6 +436,11 @@ class CSVViewModel @Inject constructor(
                 uiState = UIState.Idle
             }
 
+            is CSVEvent.ToggleRow -> handleToggleRow(event.line)
+            CSVEvent.ConfirmImport -> handleConfirm()
+            CSVEvent.BackToMapping -> uiState = UIState.Idle
+            CSVEvent.CancelImport -> resetState()
+
             is CSVEvent.FinishImport -> {
                 handleFinishImport(event)
             }
@@ -501,17 +510,25 @@ class CSVViewModel @Inject constructor(
             })
             .build()
 
-        return csvReader.readAll()
-            .map { CSVRow(it.toList()) }
+        return buildList {
+            while (true) {
+                val line = csvReader.linesRead.toInt() + 1
+                val values = csvReader.readNext() ?: break
+                add(CSVRow(values.toList(), line))
+            }
+        }
     }
     // endregion
 
+    /** Prepares the import and shows it for review. Doesn't write anything. */
     private suspend fun handleContinue() {
+        // A repeated Continue must not replace a review the user is already working on.
+        if (uiState != UIState.Idle) return
         val csv = this.csv ?: return
         val emptyStatus = MappingStatus(emptyList(), false)
 
         withContext(Dispatchers.IO) {
-            val result = csvImporter.import(
+            val plan = csvImporter.prepare(
                 csv = csv,
                 importantFields = ImportantFields(
                     amount = amount,
@@ -542,14 +559,37 @@ class CSVViewModel @Inject constructor(
                     descriptionStatus = emptyStatus,
                 ),
                 onProgress = { progressPercent ->
-                    com.ivy.legacy.utils.uiThread {
-                        uiState = UIState.Processing(
-                            (progressPercent * 100).roundToInt()
-                        )
-                    }
+                    uiState = UIState.Processing((progressPercent * 100).roundToInt())
                 }
             )
-            uiState = UIState.Result(result)
+            uiState = UIState.Review(plan = plan, excludedLines = emptySet(), error = null)
+        }
+    }
+
+    private fun handleToggleRow(line: Int) {
+        val review = uiState as? UIState.Review ?: return
+        val excluded = review.excludedLines
+        uiState = review.copy(excludedLines = if (line in excluded) excluded - line else excluded + line)
+    }
+
+    private suspend fun handleConfirm() {
+        // Events are handled one at a time and the state leaves Review right away, so a second
+        // tap on Confirm finds no review and does nothing.
+        val review = uiState as? UIState.Review ?: return
+        if (review.plan.select(review.excludedLines).rows.isEmpty()) return
+        uiState = UIState.Processing(0)
+        uiState = try {
+            val result = withContext(Dispatchers.IO) {
+                csvImporter.commit(review.plan, review.excludedLines) { progressPercent ->
+                    uiState = UIState.Processing((progressPercent * 100).roundToInt())
+                }
+            }
+            UIState.Result(result)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Timber.e(e, "CSV import failed while saving; nothing was changed")
+            review.copy(error = "Couldn't save the import. Your wallet is unchanged, you can try again.")
         }
     }
 

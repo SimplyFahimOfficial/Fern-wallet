@@ -64,6 +64,7 @@ fun CSVScreen(
         )
 
         is UIState.Processing -> ImportProcessing(progressPercent = ui.percent)
+        is UIState.Review -> CSVReviewUI(review = ui, onEvent = viewModel::onEvent)
         is UIState.Result -> ImportResultUI(
             result = ui.importResult,
             isManualCsvImport = true,
